@@ -2346,6 +2346,19 @@ class _WappPageState extends State<WappPage>
               _convStores.values.any((s) => !s.mayNotifyFor(convoId))) {
             continue;
           }
+          // A message for the thread you already have OPEN is not a popup — the
+          // window is right there and ui.convo.msg is updating it. Only while
+          // foregrounded: backgrounded, the page has handed its engine to the
+          // headless manager, which raises notifications and where no thread is
+          // on screen. _bgKeepAlive is the media-playback keepalive (false for
+          // chat), telling "you are looking at this" apart from "ticking in the
+          // background for audio".
+          if (convoId != null &&
+              convoId.isNotEmpty &&
+              !_bgKeepAlive &&
+              (convoId == _roomsOpenId || convoId == _convOpenId)) {
+            continue;
+          }
           final levelStr = (data['level'] as String? ?? 'info').toLowerCase();
           final level = switch (levelStr) {
             'success' => NotificationLevel.success,
