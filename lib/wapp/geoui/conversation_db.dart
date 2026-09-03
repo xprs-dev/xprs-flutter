@@ -53,6 +53,14 @@ class ConversationDb {
       final dir = Directory(absPath.substring(0, slash));
       if (!dir.existsSync()) dir.createSync(recursive: true);
     }
+    // openProfileDb sets a busy_timeout, so a lock met at the page->headless
+    // handoff -- the SQLite checkpoint the other engine is finishing -- is
+    // WAITED OUT at the C level rather than thrown. That timeout runs
+    // independently of this isolate (it is the OS releasing a file lock), so it
+    // needs no Dart-level retry, and a Dart sleep here would only block the UI
+    // without letting anything clear. This is where a message used to be lost:
+    // the open threw, the store fell to memory-only, and the bubble went
+    // nowhere while its notification fired.
     final db = openProfileDb(absPath);
     final out = ConversationDb._(db);
     out._migrate();

@@ -458,4 +458,71 @@ void main() {
     expect(said, 1, reason: 'said once per store, not once per message');
   });
 
+  // ── Open survives a transient lock ──────────────────────────────────────
+  //
+  // The empty box: at the page->headless handoff the DB open met a lock and
+  // threw, and the store fell to memory-only for good — a message arriving
+  // then was written nowhere while its notification fired. openProfileDb waits
+  // a lock out now, and ConversationDb.open retries a transient SqliteException
+  // rather than giving up. A normal open must be unaffected.
+
+  test('open on a fresh path returns a usable, writable database', () {
+    final db = ConversationDb.open(dbPath);
+    final store = attached(db);
+    store.upsert({'id': '#LOCAL', 'title': 'Local chat'});
+    store.addMessage({'id': '#LOCAL', 'dir': 'in', 'text': 'after a clean open'});
+    db.close();
+    final db2 = ConversationDb.open(dbPath);
+    expect(reopen(db2).messagesOf('#LOCAL').map((m) => m['text']),
+        ['after a clean open']);
+    db2.close();
+  });
+
+  test('reopening a database another handle already holds does not throw', () {
+    // Two live handles on one file — the shape of the page/headless overlap.
+    // With busy_timeout set this must not throw SQLITE_BUSY on the second open.
+    final a = ConversationDb.open(dbPath);
+    attached(a).upsert({'id': '#LOCAL', 'title': 'Local chat'});
+    final b = ConversationDb.open(dbPath); // would throw pre-fix
+    expect(b.fields(), contains('conversations'));
+    b.close();
+    a.close();
+  });
+
+  // Blocking a sender is total: no bubble, no preview, no badge.
+
+  test('a blocked sender leaves no preview and no badge', () {
+    final db = ConversationDb.open(dbPath);
+    final store = attached(db);
+    store.upsert({'id': '#LOCAL', 'title': 'Local chat'});
+    store.addMessage(
+        {'id': '#LOCAL', 'dir': 'in', 'from': 'X1BAD', 'text': 'noise'});
+    expect(store.items['#LOCAL']!.unread, 1);
+    expect(store.items['#LOCAL']!.lastLine, contains('noise'));
+
+    store.setBlocked(['X1BAD']);
+    expect(store.messagesOf('#LOCAL'), isEmpty);
+    expect(store.items['#LOCAL']!.unread, 0,
+        reason: 'no badge on a room with nothing visible');
+    expect(store.items['#LOCAL']!.lastLine, isEmpty);
+
+    store.setBlocked(const []);
+    expect(store.items['#LOCAL']!.lastLine, contains('noise'),
+        reason: 'unblocking brings the preview back');
+    db.close();
+  });
+
+  test('a new message from a blocked sender never badges', () {
+    final db = ConversationDb.open(dbPath);
+    final store = attached(db);
+    store.upsert({'id': '#LOCAL', 'title': 'Local chat'});
+    store.setBlocked(['X1BAD']);
+    store.addMessage(
+        {'id': '#LOCAL', 'dir': 'in', 'from': 'X1BAD', 'text': 'still noise'});
+    expect(store.items['#LOCAL']!.unread, 0);
+    expect(store.items['#LOCAL']!.lastLine, isEmpty);
+    expect(store.messagesOf('#LOCAL'), isEmpty);
+    db.close();
+  });
+
 }

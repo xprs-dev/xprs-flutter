@@ -90,6 +90,22 @@ void main() {
     });
   });
 
+  group('busy timeout', () {
+    // The race that lost a message: a connection opening a file another was
+    // still checkpointing threw SQLITE_BUSY the instant it met the lock, and
+    // the store fell to memory-only. openProfileDb now sets a busy_timeout so
+    // the open waits the lock out. A single Dart isolate cannot reproduce two
+    // connections contending concurrently, so this asserts the pragma is
+    // actually applied — the fix, directly.
+    test('openProfileDb applies a non-zero busy_timeout', () {
+      final dir = Directory('${profileDir('PLAIN2')}/data')
+        ..createSync(recursive: true);
+      final db = openProfileDb('${dir.path}/busy.sqlite3');
+      expect(db.select('PRAGMA busy_timeout;').first.values.first, 4000);
+      db.dispose();
+    });
+  });
+
   group('plain profiles', () {
     test('openProfileDb behaves like sqlite3.open (no keyslot)', () {
       final dir = Directory('${profileDir('PLAIN1')}/data')

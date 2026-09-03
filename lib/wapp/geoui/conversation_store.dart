@@ -273,6 +273,12 @@ class ConversationStore {
   }
 
   /// Replace the blocked-sender set (the wapp states it whole, never a delta).
+  ///
+  /// Blocking hides; it never deletes. So when the set changes, the stored
+  /// preview and unread badge of every thread are reconciled against what is
+  /// now visible — a thread whose only messages were a blocked sender's shows
+  /// no preview and no badge (rather than a count pointing at an empty room),
+  /// and unblocking brings the preview back. The message rows are untouched.
   void setBlocked(Iterable<String> from) {
     final next = from.map((e) => e.trim()).where((e) => e.isNotEmpty).toSet();
     if (next.length == blockedFrom.length && next.containsAll(blockedFrom)) {
@@ -281,6 +287,24 @@ class ConversationStore {
     blockedFrom
       ..clear()
       ..addAll(next);
+    for (final e in items.entries) {
+      final vis = _visible(messagesOf(e.key));
+      if (vis.isEmpty) {
+        // Nothing left to show: no preview, and a badge here would point at an
+        // empty room.
+        e.value.lastLine = '';
+        e.value.unread = 0;
+        if (_wt) db!.upsertThread(dbField, e.value);
+        continue;
+      }
+      final last = vis.last;
+      final text = (last['text'] ?? '').toString().trim();
+      final who = (last['from'] ?? '').toString();
+      if (text.isNotEmpty) {
+        e.value.lastLine = who.isEmpty ? text : '$who: $text';
+        if (_wt) db!.upsertThread(dbField, e.value);
+      }
+    }
   }
 
   /// The conversation currently shown (set by the widget) so the store can
@@ -406,7 +430,13 @@ class ConversationStore {
     // message and is not something anybody said, and a system note is not
     // either — quoting one as the last word would show a hex blob or a status
     // line where the conversation should be.
-    if (d['sys'] != true) {
+    // A blocked sender is INVISIBLE, and that means the preview and the unread
+    // badge too — not only the bubble list ([_visible]). Otherwise the rail
+    // showed a blocked person's words with an unread count, the user tapped in,
+    // and the room was empty: the message was there, hidden, and nothing said
+    // so. Their row is left exactly as it was.
+    final fromBlocked = blockedFrom.contains((d['from'] ?? '').toString());
+    if (d['sys'] != true && !fromBlocked) {
       final text = (d['text'] ?? '').toString().trim();
       final isVote = RegExp(r'^[0-9a-f]{8,64}:(?:un)?like$').hasMatch(text);
       if (text.isNotEmpty && !isVote) {
@@ -422,7 +452,7 @@ class ConversationStore {
     // bump, no activity stamp. Without this a refill of sixty rows would
     // badge the room sixty times and float it to the top of the rail on every
     // single launch, which is worse than the missing history it repairs.
-    if (d['backfill'] != true) {
+    if (d['backfill'] != true && !fromBlocked) {
       if (dir == 'in' && id != openId && d['sys'] != true) it.unread++;
       it.activityTs = _nowMs();
       _bump(id);

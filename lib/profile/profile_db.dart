@@ -177,12 +177,33 @@ ProfileDbLocation? locateProfileDb(String absPath) {
 /// - Encrypted profile, unlocked: opens with the derived SQLCipher key.
 /// - Encrypted profile, locked: throws [ProfileLockedException].
 /// - Wrong key / corrupt file: throws [SqliteException] (NOTADB).
+/// Wait, briefly, for a lock instead of throwing the instant one is met.
+///
+/// SQLite defaults to a zero busy timeout, so a second connection opening a
+/// file the first is still checkpointing throws SQLITE_BUSY immediately. Two
+/// engines share every profile database over a session -- a wapp's page and
+/// its headless twin, the mesh service and its stores -- and the handoff
+/// between them is a few milliseconds of overlap. Without this a message that
+/// arrived during that overlap was written to a store that never opened its
+/// database, and vanished while its notification fired. Four seconds is far
+/// longer than any checkpoint and still bounded, so a genuinely stuck lock
+/// still surfaces rather than hanging.
+void _setBusyTimeout(Database db) {
+  try {
+    db.execute('PRAGMA busy_timeout = 4000;');
+  } catch (_) {
+    // A pragma that will not set is not a reason to fail the open.
+  }
+}
+
 Database openProfileDb(String absPath) {
   ensureSqlCipherLoaded();
 
   final loc = locateProfileDb(absPath);
   if (loc == null || !ProfileKeyring.instance.isEncryptedProfile(loc.profileId)) {
-    return sqlite3.open(absPath);
+    final db = sqlite3.open(absPath);
+    _setBusyTimeout(db);
+    return db;
   }
 
   final keys = ProfileKeyring.instance.keysFor(loc.profileId);
@@ -192,6 +213,7 @@ Database openProfileDb(String absPath) {
 
   final db = sqlite3.open(absPath);
   try {
+    _setBusyTimeout(db);
     db.execute('PRAGMA key = "x\'${keys.dbKeyHex(loc.relPath)}\'";');
 
     // If the plain sqlite3 library got loaded instead of SQLCipher the key
