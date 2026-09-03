@@ -99,4 +99,33 @@ void main() {
         reason: 'absent in the file means unknown, not false');
     expect(legacy.toJson().containsKey('seen'), isFalse);
   });
+  test('a chat message does not light the bell (the chat icon owns it)',
+      () async {
+    final store = NotificationStore.instance;
+    // A conversation notification: source wapp + a convo tap target.
+    await store.record(XprsNotification(
+      level: NotificationLevel.info,
+      title: '#LOCAL',
+      source: 'wapp:chat',
+      convo: '#LOCAL',
+      tag: 'chat:#LOCAL:abc',
+    ));
+    expect(store.unreadCount.value, 0,
+        reason: 'chat unread belongs to the chat icon, not the bell');
+    expect(store.items.value, isEmpty,
+        reason: 'and it is not stacked into the bell panel either');
+  });
+
+  test('a non-conversation wapp notification still lights the bell', () async {
+    final store = NotificationStore.instance;
+    // No convo: an alert with nowhere else to go (an error, a mesh event).
+    await store.record(XprsNotification(
+      level: NotificationLevel.warning,
+      title: 'radio refused the beacon',
+      source: 'wapp:mesh',
+      tag: 'mesh:beacon:1',
+    ));
+    expect(store.unreadCount.value, 1);
+  });
+
 }

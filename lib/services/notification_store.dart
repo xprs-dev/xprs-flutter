@@ -138,7 +138,20 @@ class NotificationStore {
     unawaited(_load());
   }
 
+  /// Whether [n] belongs on the bell at all.
+  ///
+  /// The bell is for notifications that have nowhere else to go. A conversation
+  /// message does: the source wapp's own icon carries its unread count (chat's
+  /// forum badge, mail's envelope), and the in-app card already announced it.
+  /// Letting it ALSO light the bell shows one message on two counters, which is
+  /// exactly what a person reads as wrong. `convo` is set only by messaging
+  /// wapps and names the thread a tap opens, so it is the precise mark of
+  /// "this is a wapp badge's business, not the bell's".
+  static bool countsOnBell(XprsNotification n) =>
+      !(n.source.startsWith('wapp:') && (n.convo?.isNotEmpty ?? false));
+
   Future<void> record(XprsNotification n) async {
+    if (!countsOnBell(n)) return;
     var incoming = StoredNotification.fromNotification(n);
     // Same id = same notification. Replace it in place instead of stacking
     // another copy on top of it -- and carry the OLD row's seen flag and
