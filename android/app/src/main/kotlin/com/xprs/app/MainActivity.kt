@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Bundle
 import android.provider.DocumentsContract
 import android.provider.Settings
 import androidx.core.content.FileProvider
@@ -100,19 +101,59 @@ class MainActivity : FlutterFragmentActivity() {
     }
 
     /**
-     * Reuse the headless engine created at boot (if any) so opening the UI does
-     * not spawn a second isolate that would run BLE/APRS twice. Returns null on a
-     * normal cold start, letting the framework create a fresh engine.
+     * The process has ONE FlutterEngine and the Application owns it: the one
+     * created at boot for the headless service, or one created right here on
+     * a cold start. Either way it is cached under [XprsApplication.ENGINE_ID]
+     * and handed to the framework as a HOST-PROVIDED engine.
+     *
+     * This used to return null on a cold start and let the framework build
+     * the engine. That engine was then cached too ([XprsApplication.rememberFlutterEngine])
+     * so the background service could keep it — but a FlutterFragment DESTROYS
+     * an engine it created itself when the fragment goes, whatever
+     * [shouldDestroyEngineWithHost] below says (that override is consulted only
+     * for a host-provided engine). Backing out of the app therefore left a dead
+     * engine in the cache, and the next tap on the icon attached a view to it:
+     * "Cannot execute operation because FlutterJNI is not attached to native",
+     * every time, until a force-stop. Creating the engine on the Application
+     * side is what makes the "keep it" rule actually apply.
      *
      * A cached engine is only reused once Dart has reported `dartReady` — that
      * it owns a root widget. An engine whose `main()` died before its first
      * runApp has nothing to draw, and attaching the UI to it shows a black
      * screen that survives every reopen (only force-stop cleared it). Discard
-     * that one and let the framework build a fresh engine instead.
+     * that one and build a fresh one instead.
      */
+    override fun onCreate(savedInstanceState: Bundle?) {
+        // Before super.onCreate: that is where the FlutterFragment is built,
+        // and it must be built as a CACHED-engine fragment (see below).
+        val app = application as? XprsApplication
+        app?.discardDeadEngine()
+        app?.ensureFlutterEngine()
+        super.onCreate(savedInstanceState)
+    }
+
+    /**
+     * Name the process engine as the fragment's cached engine.
+     *
+     * A fragment built with `withNewEngine()` carries
+     * `destroy_engine_with_fragment = true` in its arguments, and destroys the
+     * engine when it goes -- whether the engine came from [provideFlutterEngine]
+     * or not. Only a fragment built with `withCachedEngine(id)` asks
+     * [shouldDestroyEngineWithHost], and FlutterFragmentActivity builds that one
+     * only when this returns an id (it reads the intent extra by default, which
+     * nothing here ever set). So this is the switch the override below hangs on.
+     */
+    override fun getCachedEngineId(): String? =
+        if (FlutterEngineCache.getInstance().get(XprsApplication.ENGINE_ID) != null)
+            XprsApplication.ENGINE_ID
+        else null
+
     override fun provideFlutterEngine(context: Context): FlutterEngine? {
-        (application as? XprsApplication)?.discardDeadEngine()
-        return FlutterEngineCache.getInstance().get(XprsApplication.ENGINE_ID)
+        val app = application as? XprsApplication
+        app?.discardDeadEngine()
+        val cache = FlutterEngineCache.getInstance()
+        if (cache.get(XprsApplication.ENGINE_ID) == null) app?.ensureFlutterEngine()
+        return cache.get(XprsApplication.ENGINE_ID)
     }
 
     override fun shouldDestroyEngineWithHost(): Boolean = false
