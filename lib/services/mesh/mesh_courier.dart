@@ -677,8 +677,8 @@ class MeshCourier {
         // stations, rightly, dropped it at the door. Bench 2026-09-04: the
         // message reached the phone in 43 s, waited 23 s for the key, and was
         // then delivered to nobody.
-        _unresolved.add(_UnresolvedMail(
-            f.id, f.from, body, via, xprsIdentifier(p), sigState.name));
+        _unresolved.add(_UnresolvedMail(f.id, f.from, body, via,
+            xprsIdentifier(p), sigState.name, xprsParseTs(p['ts'])));
         _pump ??= Timer.periodic(const Duration(seconds: 5), (_) => _tick());
         LogService.instance.add(
             'Courier: holding a carried packet from ${f.from} until its '
@@ -760,7 +760,9 @@ class MeshCourier {
         // receipt has to name.
         id: xprsIdentifier(p),
         call: f.from,
-        sig: sigState.name);
+        sig: sigState.name,
+        // When it was written (section 4.8), not when it got here.
+        tsMs: xprsParseTs(p['ts']));
     // REMEMBER it. `_alreadyDelivered` is checked on the way in, but nothing
     // ever recorded the delivery, so the guard read a flag no one set and the
     // same packet was delivered again on every arrival — once per bearer, and
@@ -825,7 +827,8 @@ class MeshCourier {
           via: u.via,
           id: u.packetId,
           call: u.from,
-          sig: u.sig);
+          sig: u.sig,
+          tsMs: u.tsMs);
       MeshCourierCounters.ingested++;
       LogService.instance.add(
           'Courier: delivered a held packet from ${u.from} — its key arrived');
@@ -981,9 +984,12 @@ class _UnresolvedMail {
   /// `id`, distinct from [id], which is the frame's own dedup key.
   final String packetId;
   final String sig;
+  /// The packet's own `ts:` in epoch ms -- a message held a day for its
+  /// author's key keeps the day it was written.
+  final int? tsMs;
   final DateTime since = DateTime.now();
-  _UnresolvedMail(
-      this.id, this.from, this.body, this.via, this.packetId, this.sig);
+  _UnresolvedMail(this.id, this.from, this.body, this.via, this.packetId,
+      this.sig, this.tsMs);
 }
 
 class _Token {

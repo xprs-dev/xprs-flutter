@@ -55,6 +55,18 @@ seconds, so the send has definitively failed rather than merely not yet
 succeeded. After 15 minutes the courier releases the message to the ordinary
 retry ladder.
 
+**The first minute on BLE** is before any of that. A `t:message` -- a 1:1 or a
+Local post -- is handed to the BLE5 bearer at 0, +20 s and +40 s
+(`XprsSend.repeatAfter`): the identical wire in the same advert slot, so the
+rotation entry is refreshed rather than duplicated and the bearer's
+register-time airing fires again. [ble5.md](ble5.md) section 1 is why: a frame
+transmitted once may not be observed at all, and before this the next thing
+that re-aired a 1:1 was the custody ladder, minutes later -- and nothing
+re-aired a Local post. A 1:1 stops at its receipt (XPRS.md section 13.7); each
+airing is spent on the packet's single retry-ledger entry (section 31.1), so
+the ladder that follows counts them. A wire the session lane took is not
+repeated: it went over a link.
+
 ## 2. Wire format
 
 ```

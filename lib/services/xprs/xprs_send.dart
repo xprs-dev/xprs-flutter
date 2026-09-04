@@ -35,10 +35,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
+
 import '../../profile/profile_service.dart';
 import '../log_service.dart';
 import '../mesh/mesh_custody.dart';
 import '../reticulum/rns_service.dart';
+import 'xprs_airtime.dart';
 import 'xprs_body.dart';
 import 'xprs_id.dart';
 import 'xprs_outbox.dart';
@@ -92,6 +95,47 @@ class XprsSend {
   static int sent = 0;
   static int refused = 0;
 
+  /// Messages that got their first-minute re-airings on BLE (see [_repeat]).
+  static int repeated = 0;
+
+  /// THE FIRST MINUTE ON BLE: the same wire goes out three times.
+  ///
+  /// A `t:message` used to be handed to the BLE5 bearer exactly once. The
+  /// native rotation then re-airs the registered bytes for one slice of a
+  /// five-second window per minute, shared with every other frame this
+  /// station has on the air, and docs/ble5.md section 1 is blunt about what
+  /// one airing is worth: "a frame transmitted once may not be observed at
+  /// all". Measured on the bench (2026-09-04): a 1:1 to the phone next to us
+  /// missed its first airing, and the next thing that re-aired it was the
+  /// custody ladder, minutes later. A Local post has no ladder at all -- one
+  /// airing, or nothing.
+  ///
+  /// So a message is re-published at +20 s and +40 s, THE IDENTICAL WIRE in
+  /// the SAME slot: section 9.3's rule for anything that must arrive
+  /// ("re-airs until it is answered ... the same wire, so `ts:` and the
+  /// section 5 identifier are unchanged"), and section 31.1's ("a retry is
+  /// not a new packet"). Re-registering a slot refreshes the rotation entry
+  /// rather than adding one, and the bearer airs the just-registered frame
+  /// immediately (Ble5.kt, R4) -- which is the airing this buys. Everything
+  /// after the first minute is exactly what it was: the custody park, the
+  /// release ladder, the session lane.
+  ///
+  /// The gaps between airings: 20 s, then 20 s -- at +20 s and +40 s.
+  /// Overridable so a test can run the minute in no time.
+  static List<Duration> repeatAfter = const [
+    Duration(seconds: 20),
+    Duration(seconds: 20),
+  ];
+
+  /// How [_repeat] waits. A test replaces it to advance a fake clock.
+  static Future<void> Function(Duration) wait = (d) => Future.delayed(d);
+
+  /// The spacing the ledger enforces between the three airings: one rung,
+  /// shorter than the schedule above so the schedule is what decides, and the
+  /// ledger is what remembers (section 31.1 -- one count per packet, however
+  /// many mechanisms air it).
+  static const List<int> _messageLadderS = [15, 15];
+
   /// Send [text] to [to] as a `t:message`.
   ///
   /// [private] asks for §9.2's sealed body. It is a request, not a mode: when
@@ -144,7 +188,7 @@ class XprsSend {
     // and the one a receipt names in `r:`.
     final id = xprsIdentifier(built.rejoined ?? built.packets.first);
 
-    unawaited(_air(built.packets, dest: dest, id: id));
+    unawaited(airDirect(built.packets, dest: dest, id: id));
     sent++;
     return XprsSendOutcome(
       form: built.privacy == XprsPrivacy.sealed ? 'x' : 'm',
@@ -165,7 +209,7 @@ class XprsSend {
   /// which is different from [message], where the request is meaningful and a
   /// refusal is the answer. [XprsSendOutcome.form] is `m` on success, always.
   ///
-  /// No custody copy and no outbox row; see [_airBroadcast] for why.
+  /// No custody copy and no outbox row; see [airBroadcast] for why.
   XprsSendOutcome broadcast(String text,
       {String scope = 'local', String replyTo = ''}) {
     final self = (ProfileService.instance.activeProfile?.callsign ?? '')
@@ -211,7 +255,7 @@ class XprsSend {
     }
 
     final id = xprsIdentifier(built.rejoined ?? built.packets.first);
-    unawaited(_airBroadcast(built.packets, id: id));
+    unawaited(airBroadcast(built.packets, id: id));
     sent++;
     return XprsSendOutcome(form: 'm', id: id, parts: built.packets.length);
   }
@@ -246,8 +290,12 @@ class XprsSend {
   /// destination: nobody owes a receipt for a broadcast, so a row recorded here
   /// could only ever sit at `sent`. An outbox row that can never advance is a
   /// tick that never arrives, and a bug with no name.
-  Future<void> _airBroadcast(List<XprsPacket> parts,
+  ///
+  /// Public only for the test that runs it without a profile.
+  @visibleForTesting
+  Future<void> airBroadcast(List<XprsPacket> parts,
       {required String id}) async {
+    final again = <_Aired>[];
     for (var i = 0; i < parts.length; i++) {
       // ITS OWN ADVERT SLOT, per message and per part.
       //
@@ -257,27 +305,86 @@ class XprsSend {
       // and evict its predecessor before the rotation reached it — two posts
       // in a minute, one on the air. The same reasoning `moderate` already
       // carries there: a distinct record keys on its own §5 identifier.
-      await XprsPublisher.instance
-          .publishWire(parts[i].encode(), slot: 'message:$id:${i + 1}');
+      final slot = 'message:$id:${i + 1}';
+      final report = await XprsPublisher.instance
+          .publishWire(parts[i].encode(), slot: slot);
+      if (report['ble5'] == 'sent') {
+        again.add(_Aired(
+            XprsPublisher.instance.lastWire ?? parts[i].encode(), slot));
+      }
     }
+    unawaited(_repeat(again, id: id));
   }
 
-  Future<void> _air(List<XprsPacket> parts,
+  /// Public only for the test that runs it without a profile.
+  @visibleForTesting
+  Future<void> airDirect(List<XprsPacket> parts,
       {required String dest, required String id}) async {
-    for (final part in parts) {
-      await XprsPublisher.instance.publishWire(part.encode());
+    final again = <_Aired>[];
+    for (var i = 0; i < parts.length; i++) {
+      // Per record, like the broadcast: the default slot for a packet with a
+      // `d:` is `message:<dest>`, so two messages to the same station inside
+      // the advert TTL shared one rotation entry -- and once a message is
+      // re-registered at +20 s and +40 s, a shared slot would put the OLDER
+      // one back in the entry and evict the newer.
+      final slot = 'message:$id:${i + 1}';
+      final report =
+          await XprsPublisher.instance.publishWire(parts[i].encode(), slot: slot);
       // Park a custody copy of exactly the bytes that went out — the signed
       // wire, not the one composed here, or the parked copy and the air carry
       // different identifiers and a receipt releases neither.
-      final signed = XprsPublisher.instance.lastWire ?? part.encode();
+      final signed = XprsPublisher.instance.lastWire ?? parts[i].encode();
       try {
         MeshCustodyDelegate.onAirFrame(Uint8List.fromList(utf8.encode(signed)),
             outbound: true);
       } catch (_) {
         // Custody is best-effort; a message that went out is out.
       }
+      if (report['ble5'] == 'sent') again.add(_Aired(signed, slot));
     }
     XprsOutbox.instance.noteSent(id, dest);
+    unawaited(_repeat(again, id: id, dest: dest));
+  }
+
+  /// The two further airings of [repeatAfter], for the wires the BLE5 bearer
+  /// actually put on the air. Nothing else qualifies: a wire the session lane
+  /// took (`session`, `gatt-1:1`) went over a link and arrived or failed
+  /// there, and a bearer that was inactive or deferred is the custody
+  /// ladder's business, not this one's.
+  ///
+  /// A 1:1 stops the moment its receipt arrives (section 13.7 -- the receipt
+  /// is what ends re-airing). A broadcast has no receipt and runs the
+  /// schedule out. Each airing is spent on the packet's one ledger entry, so
+  /// the custody ladder that follows sees three attempts, not none.
+  ///
+  /// `prefer: 'ble5'` because that is the bearer whose first airing is the
+  /// unreliable one; when it carries the wire the others are left alone, and
+  /// when it cannot the fan-out is what it always is.
+  Future<void> _repeat(List<_Aired> wires,
+      {required String id, String? dest}) async {
+    if (wires.isEmpty) return;
+    final ledger = XprsRetryLedger.instance;
+    ledger.spend(id);
+    var airings = 1;
+    for (final after in repeatAfter) {
+      await wait(after);
+      if (dest != null) {
+        final s = XprsOutbox.instance.stateOf(id);
+        if (s == TxState.delivered || s == TxState.read) return;
+      }
+      if (!ledger.may(id, reachable: true, ladderS: _messageLadderS)) continue;
+      ledger.spend(id);
+      for (final w in wires) {
+        await XprsPublisher.instance.publishWire(w.wire,
+            slot: w.slot, verbatim: true, prefer: 'ble5');
+      }
+      airings++;
+    }
+    repeated++;
+    // Once per message, at the end -- not per airing (docs/performance.md
+    // section 8.10).
+    LogService.instance.add('XPRS: $id aired ${airings}x on ble5 in its '
+        'first minute');
   }
 
   static String _now() {
@@ -290,5 +397,14 @@ class XprsSend {
   static void debugReset() {
     sent = 0;
     refused = 0;
+    repeated = 0;
   }
+}
+
+/// One wire the BLE5 bearer aired, and the slot it went out under -- what a
+/// re-airing has to repeat exactly.
+class _Aired {
+  const _Aired(this.wire, this.slot);
+  final String wire;
+  final String slot;
 }

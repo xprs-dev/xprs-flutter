@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:xprs/services/mesh/mesh_courier.dart';
+import 'package:xprs/services/reticulum/rns_service.dart';
+import 'package:xprs/services/xprs/xprs_vocab.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 Uint8List wire(String from, String to, String text) =>
@@ -50,6 +52,36 @@ void main() {
             .ingest(Uint8List.fromList(utf8.encode('nonsense')), via: 'test'),
         isFalse,
       );
+    });
+  });
+
+  group('the inbox door keeps the time a carried message was written', () {
+    // The wire stamps `ts:` (section 4.8) and custody carries it unchanged;
+    // the inbox row used to say "now" regardless, so a message that spent a
+    // night in a custodian's pocket was dated at breakfast.
+    const src = '23698e7593f05e2053f5183580e2cf98';
+
+    test('a packet ts: reaches the row as epoch seconds', () {
+      final written = xprsParseTs('2026-08-08_14:26:40')!;
+      RnsService.instance.injectLxmf(
+          sourceHex: src,
+          content: 'written yesterday, carried today',
+          call: 'X1A67X',
+          id: 'a1b2c3',
+          tsMs: written);
+      final row = RnsService.instance.lxmfInbox.last;
+      expect(row['content'], 'written yesterday, carried today');
+      expect((row['ts'] as double) * 1000, written.toDouble(),
+          reason: 'the bubble shows when it was said, not when it arrived');
+    });
+
+    test('a wire with no stamp is dated by its arrival', () {
+      final before = DateTime.now().millisecondsSinceEpoch;
+      RnsService.instance
+          .injectLxmf(sourceHex: src, content: 'no ts on this one');
+      final row = RnsService.instance.lxmfInbox.last;
+      expect((row['ts'] as double) * 1000,
+          greaterThanOrEqualTo(before.toDouble()));
     });
   });
 }
