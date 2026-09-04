@@ -250,6 +250,14 @@ class XprsMonitor {
   /// what. Read by [stationsJson] only.
   final Map<String, ({int lastMs, String bearer})> _recent = {};
 
+  /// XPRS stations whose packets reached us over Reticulum -- the internet
+  /// lane -- within [rememberedFor]. NOT the air: [offer] refuses that
+  /// bearer and always will. Kept apart, under its own name, so a list that
+  /// says "over the air" stays true and a list that says "on Reticulum" can
+  /// exist at all. Fed by [noteRemote] from the Reticulum ingest; read by
+  /// [stationsJson] only.
+  final Map<String, int> _remote = {};
+
   /// Bumped whenever something changed, so a wapp can skip a redraw. Same
   /// trick `MeshService.revision` uses.
   int revision = 0;
@@ -426,6 +434,7 @@ class XprsMonitor {
     while (_recent.length > rememberedMax) {
       _recent.remove(_recent.keys.first);
     }
+    _remote.removeWhere((_, t) => now - t > rememberedFor.inMilliseconds);
     if (_stations.length != before) _bump();
   }
 
@@ -434,10 +443,30 @@ class XprsMonitor {
   Map<String, ({int lastMs, String bearer})> get recent =>
       Map.unmodifiable(_recent);
 
+  /// An XPRS packet from [callsign] arrived over Reticulum. Remembered for
+  /// [rememberedFor] as "on Reticulum" -- the third section of
+  /// [stationsJson] -- and nowhere else: not the traffic ring, not the
+  /// in-earshot table, not the this-hour memory. A station also heard on the
+  /// air is listed as local and not here; the air is the better answer.
+  void noteRemote(String callsign, {int? nowMs}) {
+    final c = callsign.trim().toUpperCase();
+    if (c.isEmpty) return;
+    final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    _remote.remove(c); // re-insert: the map keeps insertion order, oldest first
+    _remote[c] = now;
+    while (_remote.length > rememberedMax) {
+      _remote.remove(_remote.keys.first);
+    }
+    _bump();
+  }
+
+  Map<String, int> get remote => Map.unmodifiable(_remote);
+
   void clear() {
     _ring.clear();
     _stations.clear();
     _recent.clear();
+    _remote.clear();
     _bump();
   }
 
@@ -482,10 +511,26 @@ class XprsMonitor {
               'tags': [_ago(now - e.value.lastMs), e.value.bearer.toUpperCase()],
             })
         .toList();
+    // The third section: reached us over Reticulum this hour, and not heard
+    // on the air at all -- a station on the air is listed there, once.
+    final remote = _remote.entries
+        .where((e) => !_stations.containsKey(e.key) && !_recent.containsKey(e.key))
+        .toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    final onRns = remote
+        .map((e) => {
+              'id': e.key,
+              'title': e.key,
+              'subtitle': 'RNS',
+              'tags': [_ago(now - e.value), 'RNS'],
+            })
+        .toList();
     return jsonEncode([
       {'title': 'Heard over the air (${items.length})', 'items': items},
       if (earlier.isNotEmpty)
         {'title': 'Heard this hour (${earlier.length})', 'items': earlier},
+      if (onRns.isNotEmpty)
+        {'title': 'On Reticulum (${onRns.length})', 'items': onRns},
     ]);
   }
 
@@ -497,6 +542,7 @@ class XprsMonitor {
         'revision': revision,
         'stations': _stations.length,
         'recent': _recent.length,
+        'remote': _remote.length,
         'sightings': _ring.length,
         'bearers': {
           for (final b in kBearers)

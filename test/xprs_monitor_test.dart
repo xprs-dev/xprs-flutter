@@ -173,6 +173,36 @@ void main() {
       expect(m.recent, isEmpty);
     });
 
+    test('a station on Reticulum is listed under that name, and not on the air',
+        () {
+      final m = XprsMonitor.instance;
+      final t0 = DateTime.now().millisecondsSinceEpoch;
+      const min = 60 * 1000;
+      m.noteRemote('X1FAR', nowMs: t0);
+      expect(m.ring, isEmpty, reason: 'not traffic');
+      expect(m.stations, isEmpty, reason: 'not in earshot');
+      var secs = jsonDecode(m.stationsJson(nowMs: t0 + min)) as List;
+      expect(secs.length, 2);
+      expect(secs[0]['items'], isEmpty);
+      expect(secs[1]['title'], 'On Reticulum (1)');
+      final row = (secs[1]['items'] as List).single as Map;
+      expect(row['id'], 'X1FAR');
+      expect((row['tags'] as List), ['seen 1m ago', 'RNS']);
+
+      // Also heard on the air: listed once, as local.
+      m.offer(p('t:observation f:X1FAR link:ble'),
+          bearer: 'ble', selfCallsign: 'X1A67X', nowMs: t0 + 2 * min);
+      secs = jsonDecode(m.stationsJson(nowMs: t0 + 3 * min)) as List;
+      expect(secs.length, 1);
+      expect((secs[0]['items'] as List).single['id'], 'X1FAR');
+
+      // Quiet for an hour on both lanes: gone from every section.
+      secs = jsonDecode(m.stationsJson(nowMs: t0 + 2 * min + 61 * min)) as List;
+      expect(secs.length, 1);
+      expect(secs[0]['items'], isEmpty);
+      expect(m.remote, isEmpty);
+    });
+
     test('the remembered set is bounded', () {
       final m = XprsMonitor.instance;
       final t0 = DateTime.now().millisecondsSinceEpoch;

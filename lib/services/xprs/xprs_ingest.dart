@@ -568,6 +568,9 @@ class XprsIngest {
     );
     final fromC = _base(p['f'] ?? '');
     if (fromC.isEmpty || (self.isNotEmpty && fromC == self)) return;
+    // A station reached us over Reticulum: on the list, under that name and
+    // no other (the air is [heard]'s, and stays so).
+    XprsMonitor.instance.noteRemote(fromC);
 
     // The hub lane serves too (docs/XPRS.md 36.0: the archiver role does not
     // change with the bearer). Commands and results route to the same hooks
