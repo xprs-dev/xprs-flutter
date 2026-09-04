@@ -137,6 +137,54 @@ void main() {
       expect(m.stations, isEmpty);
     });
 
+    test('…but stays under "heard this hour" for an hour, then goes', () {
+      // "New chat" asks who was around, not only who beaconed in the last
+      // eleven minutes: the phone on the next desk that went quiet at
+      // 14:10 is listed at 14:25, and gone by 15:11. The in-earshot table
+      // every reachability decision reads is untouched by this.
+      final m = XprsMonitor.instance;
+      final t0 = DateTime.now().millisecondsSinceEpoch;
+      const min = 60 * 1000;
+      m.offer(p(beacon), bearer: 'ble', selfCallsign: 'X1A67X', nowMs: t0);
+      var secs = jsonDecode(m.stationsJson(nowMs: t0 + 10 * min)) as List;
+      expect(secs.length, 1, reason: 'still in earshot: one section');
+      expect((secs[0]['items'] as List).single['id'], 'X1RD89');
+
+      secs = jsonDecode(m.stationsJson(nowMs: t0 + 12 * min)) as List;
+      expect(m.stations, isEmpty, reason: 'out of earshot for the core');
+      expect(secs.length, 2);
+      expect(secs[0]['title'], 'Heard over the air (0)');
+      expect(secs[1]['title'], 'Heard this hour (1)');
+      final row = (secs[1]['items'] as List).single as Map;
+      expect(row['id'], 'X1RD89');
+      expect((row['tags'] as List).first, 'seen 12m ago');
+      expect((row['tags'] as List), contains('BLE'));
+
+      // Heard again: back in earshot, and not listed twice.
+      m.offer(p(beacon), bearer: 'lan', selfCallsign: 'X1A67X',
+          nowMs: t0 + 30 * min);
+      secs = jsonDecode(m.stationsJson(nowMs: t0 + 31 * min)) as List;
+      expect(secs.length, 1);
+      expect(m.recent, isEmpty);
+
+      secs = jsonDecode(m.stationsJson(nowMs: t0 + 30 * min + 61 * min)) as List;
+      expect(secs.length, 1);
+      expect(secs[0]['items'], isEmpty, reason: 'an hour of silence: gone');
+      expect(m.recent, isEmpty);
+    });
+
+    test('the remembered set is bounded', () {
+      final m = XprsMonitor.instance;
+      final t0 = DateTime.now().millisecondsSinceEpoch;
+      for (var i = 0; i < XprsMonitor.rememberedMax + 20; i++) {
+        final call = 'X1${i.toRadixString(36).toUpperCase().padLeft(4, 'Q')}';
+        m.offer(p('t:observation f:$call link:ble'),
+            bearer: 'ble', selfCallsign: 'X1A67X', nowMs: t0 + i);
+      }
+      m.sweep(nowMs: t0 + XprsMonitor.staleAfter.inMilliseconds + 1000);
+      expect(m.recent.length, XprsMonitor.rememberedMax);
+    });
+
     test('the revision moves so a wapp can skip a redraw', () {
       final m = XprsMonitor.instance;
       final before = m.revision;

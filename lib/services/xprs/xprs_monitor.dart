@@ -231,8 +231,24 @@ class XprsMonitor {
   /// tier) so a quiet-but-present station does not flicker out.
   static const Duration staleAfter = Duration(minutes: 11);
 
+  /// How long a station that has gone quiet stays LISTED after [staleAfter]
+  /// -- "heard this hour", the second section of [stationsJson].
+  ///
+  /// [_stations] is the core's "in earshot" and every reachability decision
+  /// (catch-up, file fetch, the mesh scheduler) reads it as such, so its
+  /// window is not widened. But a person opening "New chat" is asking a
+  /// wider question -- who was around, not only who beaconed in the last
+  /// eleven minutes -- and a phone that went quiet fifteen minutes ago is
+  /// still the phone on the next desk. Kept separately, for the list only.
+  static const Duration rememberedFor = Duration(hours: 1);
+  static const int rememberedMax = 128;
+
   final List<XprsSighting> _ring = [];
   final Map<String, XprsStation> _stations = {};
+
+  /// Stations swept out of [_stations]: when they were last heard, and on
+  /// what. Read by [stationsJson] only.
+  final Map<String, ({int lastMs, String bearer})> _recent = {};
 
   /// Bumped whenever something changed, so a wapp can skip a redraw. Same
   /// trick `MeshService.revision` uses.
@@ -295,6 +311,7 @@ class XprsMonitor {
     if (_ring.length > ringMax) _ring.removeRange(0, _ring.length - ringMax);
 
     final st = _stations.putIfAbsent(from, () => XprsStation(from, bearer, now));
+    _recent.remove(from); // heard again: back in earshot
     st.bearer = bearer;
     st.bearers[bearer] = now;
     // The station's own `link:` (10.6.1) -- what IT says it is on, which
@@ -397,13 +414,30 @@ class XprsMonitor {
   void sweep({int? nowMs}) {
     final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
     final before = _stations.length;
-    _stations.removeWhere((_, s) => now - s.lastMs > staleAfter.inMilliseconds);
+    final gone = [
+      for (final e in _stations.entries)
+        if (now - e.value.lastMs > staleAfter.inMilliseconds) e.key
+    ];
+    for (final k in gone) {
+      final s = _stations.remove(k)!;
+      _recent[k] = (lastMs: s.lastMs, bearer: s.bearer);
+    }
+    _recent.removeWhere((_, r) => now - r.lastMs > rememberedFor.inMilliseconds);
+    while (_recent.length > rememberedMax) {
+      _recent.remove(_recent.keys.first);
+    }
     if (_stations.length != before) _bump();
   }
+
+  /// Stations heard within the last [rememberedFor] but not within
+  /// [staleAfter] -- what [stationsJson]'s second section lists.
+  Map<String, ({int lastMs, String bearer})> get recent =>
+      Map.unmodifiable(_recent);
 
   void clear() {
     _ring.clear();
     _stations.clear();
+    _recent.clear();
     _bump();
   }
 
@@ -435,8 +469,23 @@ class XprsMonitor {
       };
     }).toList();
 
+    // The second section: heard this hour, not in the last eleven minutes.
+    // The same shape, so a wapp walks both the same way; fewer tags, because
+    // a signal strength from forty minutes ago is not a fact about now.
+    final recent = _recent.entries.toList()
+      ..sort((a, b) => b.value.lastMs.compareTo(a.value.lastMs));
+    final earlier = recent
+        .map((e) => {
+              'id': e.key,
+              'title': e.key,
+              'subtitle': e.value.bearer.toUpperCase(),
+              'tags': [_ago(now - e.value.lastMs), e.value.bearer.toUpperCase()],
+            })
+        .toList();
     return jsonEncode([
-      {'title': 'Heard over the air (${items.length})', 'items': items}
+      {'title': 'Heard over the air (${items.length})', 'items': items},
+      if (earlier.isNotEmpty)
+        {'title': 'Heard this hour (${earlier.length})', 'items': earlier},
     ]);
   }
 
@@ -447,6 +496,7 @@ class XprsMonitor {
   Map<String, dynamic> statusJson() => {
         'revision': revision,
         'stations': _stations.length,
+        'recent': _recent.length,
         'sightings': _ring.length,
         'bearers': {
           for (final b in kBearers)
