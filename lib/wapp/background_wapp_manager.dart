@@ -129,10 +129,11 @@ class BackgroundWappManager {
       engine.setAppId(name);
       // Grant BEFORE load: imports are bound during instantiation, so a
       // permission read afterwards would be a permission that did nothing.
-      engine.grantedPermissions =
-          declaredPermissions(await pkg.readString('manifest.json'));
+      final manifestJson = await pkg.readString('manifest.json');
+      engine.grantedPermissions = declaredPermissions(manifestJson);
       await engine.load(wasm);
-      final svc = _WappBackgroundService(name, wappDir, engine, prefs);
+      final svc = _WappBackgroundService(name, wappDir, engine, prefs,
+          wappOwnedConversations: wappOwnsConversations(manifestJson));
       _running[name] = svc;
       await svc
           .start(); // registers the monitor task, runs init, starts ticking
@@ -292,7 +293,8 @@ class BackgroundWappManager {
 /// Runs on the main isolate because the wapp HAL touches the shared BLE
 /// service (a main-isolate plugin); the governor auto-pauses a runaway tick.
 class _WappBackgroundService extends BackgroundService {
-  _WappBackgroundService(String name, this.wappDir, this.engine, this.prefs)
+  _WappBackgroundService(String name, this.wappDir, this.engine, this.prefs,
+      {this.wappOwnedConversations = false})
     : super(
         id: 'wapp.bg.$name',
         name: name,
@@ -305,6 +307,10 @@ class _WappBackgroundService extends BackgroundService {
   final String wappDir;
   final WappEngine engine;
   final PreferencesService prefs;
+
+  /// Manifest `"conversations": "wapp"`: the wapp persists its own history
+  /// and the stores below are a render cache nobody reads while headless.
+  final bool wappOwnedConversations;
 
   /// Geo-chat archive for this wapp (shared with the foreground page via the
   /// data dir), so Live messages are persisted even while running headless.
@@ -336,7 +342,8 @@ class _WappBackgroundService extends BackgroundService {
       _convStores.putIfAbsent(field, () {
         final store = ConversationStore()
           ..dbField = field
-          ..owner = name;
+          ..owner = name
+          ..wappOwned = wappOwnedConversations;
         final db = _convDb;
         if (db != null) {
           store.db = db;
@@ -346,6 +353,7 @@ class _WappBackgroundService extends BackgroundService {
       });
 
   Future<void> _loadConversations() async {
+    if (wappOwnedConversations) return;
     final data = wappDataStorageFor(prefs, name);
     try {
       _convDb = ConversationDb.open(

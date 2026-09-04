@@ -180,11 +180,16 @@ class ConversationStore {
   /// Which wapp this store belongs to, named in the warning below.
   String owner = '';
 
+  /// The wapp keeps its own history and repaints this store from it
+  /// (`"conversations": "wapp"` in its manifest). Memory-only is then the
+  /// design, not a failure, and the warning below stays quiet.
+  bool wappOwned = false;
+
   bool _saidMemoryOnly = false;
 
   bool get _wt {
     if (db != null && loaded) return true;
-    if (!_saidMemoryOnly) {
+    if (!_saidMemoryOnly && !wappOwned) {
       _saidMemoryOnly = true;
       // Open-time already said the database would not open. This is the only
       // place that can say a MESSAGE was not written, which is the fact a

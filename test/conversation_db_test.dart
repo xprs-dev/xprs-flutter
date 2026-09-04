@@ -458,6 +458,25 @@ void main() {
     expect(said, 1, reason: 'said once per store, not once per message');
   });
 
+  test('a wapp-owned store is a render cache and says nothing about it', () {
+    final store = ConversationStore()
+      ..owner = 'chat'
+      ..dbField = 'wapp_owned_probe'
+      ..wappOwned = true;
+    store.upsert({'id': '#LOCAL', 'title': 'Local chat', 'unread': 2});
+    store.addMessage(
+        {'id': '#LOCAL', 'dir': 'in', 'text': 'painted by the wapp', 'backfill': true});
+    expect(store.memoryOnly, isTrue);
+    expect(store.messagesOf('#LOCAL').map((m) => m['text']), ['painted by the wapp']);
+    // The wapp said 2 and a backfill bubble counts nothing: the wapp's number stands.
+    expect(store.items['#LOCAL']!.unread, 2);
+    final said = LogService.instance
+        .tail(200)
+        .where((l) => l.contains('MEMORY-ONLY') && l.contains('wapp_owned_probe'))
+        .length;
+    expect(said, 0, reason: 'memory-only is the design here, not a failure');
+  });
+
   // ── Open survives a transient lock ──────────────────────────────────────
   //
   // The empty box: at the page->headless handoff the DB open met a lock and

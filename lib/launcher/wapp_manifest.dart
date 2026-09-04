@@ -90,6 +90,11 @@ class WappManifest {
   /// (`manifest.user_modified`). The launcher badges these as customized.
   final bool userModified;
 
+  /// Who persists this wapp's conversations: `host` (the default -- the
+  /// host's `conversations.sqlite3`) or `wapp` (the wapp keeps its own
+  /// history through `hal_sqlite_*`; the host's stores are a render cache).
+  final String conversationsOwner;
+
   WappManifest({
     required this.id,
     required this.name,
@@ -113,6 +118,7 @@ class WappManifest {
     this.supportedHardware = const [],
     this.nativeBinaries = const {},
     this.userModified = false,
+    this.conversationsOwner = 'host',
   });
 
   /// Whether this wapp advertises support for [host] (an OS name from
@@ -251,6 +257,7 @@ class WappManifest {
         };
       }(),
       userModified: json['user_modified'] == true,
+      conversationsOwner: json['conversations'] == 'wapp' ? 'wapp' : 'host',
     );
   }
 

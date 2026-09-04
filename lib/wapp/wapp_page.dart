@@ -735,11 +735,16 @@ class _WappPageState extends State<WappPage>
   /// the state in which nothing may be written.
   ConversationDb? _convDb;
 
+  /// The wapp persists its own conversations (manifest
+  /// `"conversations": "wapp"`); the stores here are its render cache.
+  bool _convWappOwned = false;
+
   ConversationStore _convStore(String field) =>
       _convStores.putIfAbsent(field, () {
         final store = ConversationStore()
           ..dbField = field
-          ..owner = _wappName;
+          ..owner = _wappName
+          ..wappOwned = _convWappOwned;
         final db = _convDb;
         if (db != null) {
           // A field first seen at runtime has no stored history to lose, so it
@@ -772,6 +777,11 @@ class _WappPageState extends State<WappPage>
   Future<void> _loadConversations() async {
     final data = _wappData;
     if (data == null) return;
+    // A wapp that owns its history repaints the view itself at every start;
+    // the host keeps nothing, so there is nothing to open or restore.
+    _convWappOwned =
+        wappOwnsConversations(await _pkg.readString('manifest.json'));
+    if (_convWappOwned) return;
     try {
       _convDb = ConversationDb.open(
         data.getAbsolutePath('conversations.sqlite3'),
@@ -826,6 +836,10 @@ class _WappPageState extends State<WappPage>
   /// Re-open the database and refill every store — used when coming back to
   /// the foreground, where the headless engine may have written in the gap.
   Future<void> _reloadConversations() async {
+    // The page engine stays on the event bus while paused, so a wapp-owned
+    // cache already holds what the headless engine wrote; clearing it would
+    // throw away the view for nothing.
+    if (_convWappOwned) return;
     _convDb?.close();
     _convDb = null;
     for (final store in _convStores.values) {
