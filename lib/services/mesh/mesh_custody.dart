@@ -54,6 +54,13 @@ class MeshTransportHooks {
   /// wired) and false both mean "air it as before".
   bool Function(String callsign)? canTakeCustody;
 
+  /// Is [callsign] worth DIALLING for a 1:1 right now -- in reach on a
+  /// verified address, and not known to refuse custody? Weaker than
+  /// [canTakeCustody]: a peer we have never held a session with answers yes
+  /// here and no there, so the first 1:1 to it is aired AND the session that
+  /// records its caps is started at once, instead of only after the second.
+  bool Function(String callsign)? dialWorth;
+
   /// Send one MSP frame on the client link (our GATT client → peer FFF1).
   Future<void> Function(Uint8List data)? clientSend;
 
@@ -628,6 +635,20 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
           .add('Mesh: $to is next to us — handing $am over, not airing it');
       return true;
     }
+    // First contact: the peer is in reach on an address we can dial, but it
+    // has never told us (in an MSP HELLO) whether it takes custody. Air the
+    // message as before -- one advert is cheap and a third device may park a
+    // backup -- and ALSO start the session now. Bench 2026-09-04: with only
+    // the advert, a 1:1 to the phone on the next desk was lost on the air
+    // (the peer's radio was serving another central) and took 86 s by way of
+    // a third phone's custody; the dial that would have carried it in ~2 s
+    // (docs/ble5.md 9.8) was never started, because the peer's caps were
+    // unknown and the scheduler had no reason of its own to call it.
+    if (outbound && parked && _dialWorth(to)) {
+      _pokeOnce(to);
+      LogService.instance
+          .add('Mesh: $to is in reach — dialing to hand $am over (aired too)');
+    }
     // Chat attachment: our outbound 1:1 references media we host — queue the
     // payload for the bulk lane (the message travels custody, bytes follow).
     if (outbound && text.contains('file:')) {
@@ -659,6 +680,29 @@ class MeshCustodyDelegate implements MeshSessionDelegate {
     final ask = MeshSessionManager.instance.hooks.canTakeCustody;
     if (ask == null) return false; // no transport wired: air it, as before
     return ask(to.toUpperCase());
+  }
+
+  static bool _dialWorth(String to) {
+    if (to.isEmpty) return false;
+    final ask = MeshSessionManager.instance.hooks.dialWorth;
+    if (ask == null) return false;
+    return ask(to.toUpperCase());
+  }
+
+  /// Should a 1:1 to this peer START a session now, whatever else happens to
+  /// the advert? Pure, for the tests.
+  ///
+  /// Yes when the peer is dialable and either declared `msgCustody` or has
+  /// declared nothing yet. A peer that declared caps WITHOUT custody -- every
+  /// ESP32 -- is left alone: the dial would succeed and the HELLO would say no
+  /// again, at the cost of the dongle's radio going deaf for the attempt.
+  static bool worthDialing(
+      {required bool dialableNow,
+      required bool capsKnown,
+      required int peerCaps}) {
+    if (!dialableNow) return false;
+    if (!capsKnown) return true;
+    return (peerCaps & MspCaps.msgCustody) != 0;
   }
 
   /// The decision itself, pure, so it can be tested without a live radio.

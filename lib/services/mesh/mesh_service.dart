@@ -475,8 +475,13 @@ class MeshService {
         'Mesh: XPRS beacon from $from ($rssi dBm) — '
         '${heard.length} of ${peers ?? heard.length} peers listed');
     // The sender is by definition directly heard, so this is a sighting like
-    // any other: it registers the address for dialling.
-    onPeerSighting?.call(from, peer);
+    // any other: it registers the address for dialling -- unless the packet
+    // carries `via:`, in which case the address we heard it from is the
+    // RELAYER's and the author may be nowhere near. Filing it under the
+    // author's callsign is how the C61 spent a session believing X1VCVM lived
+    // at X1WATT's address ("dropped the bad dial address" is the HELLO
+    // correcting it, one dial too late).
+    if ((p['via'] ?? '').trim().isEmpty) onPeerSighting?.call(from, peer);
 
     // `lx:` says where to write to this station (section 10.6). Hearing it is
     // not the same as being able to address it: that needs a Reticulum path,
@@ -1103,13 +1108,24 @@ class MeshService {
         'Mesh: $callsign heard on $bearer with ${pending.length} to release '
         '(36.8.1)');
     if (bearer == 'ble') {
-      // The session lane: clear the backoff and decide now.
-      MeshTransferScheduler.instance.pokeFor(callsign);
-      return;
+      // The session lane: clear the backoff and decide now. When that lane has
+      // the peer in hand -- a dial just went out, or a session with it is up
+      // -- the held mail crosses over the link and the air is left alone.
+      if (MeshTransferScheduler.instance.pokeFor(callsign)) return;
+      // Otherwise the radio is spoken for (a session with somebody else, a
+      // dial in flight, a backoff), and the peer is beaconing at us RIGHT NOW
+      // -- so this is when an advert has the best chance of being heard. Fall
+      // through and re-air, paced by the store's release backoff (0, 30, 120,
+      // 600 s) so a peer that beacons every thirty seconds does not draw the
+      // same frame every thirty seconds. Bench 2026-09-04: a 1:1 whose single
+      // advert was lost sat in the store for 86 s while the scheduler was
+      // busy with a hub, and the target beaconed at us twice in that time.
+      LogService.instance.add(
+          'Mesh: session lane busy — re-airing for $callsign instead');
     }
-    // No session lane on this bearer: re-air the held wires, paced, under the
-    // publisher's budgets. The receipt (13.7) is what marks them done -- an
-    // aired copy is an attempt, not a delivery.
+    // Re-air the held wires, paced, under the publisher's budgets. The
+    // receipt (13.7) is what marks them done -- an aired copy is an attempt,
+    // not a delivery.
     unawaited(() async {
       for (final m in pending) {
         // The stored wire is bytes; the publisher speaks text wires. A held

@@ -160,11 +160,21 @@ class MeshTransferScheduler {
   /// decision NOW instead of waiting out the periodic tick. Clearing the
   /// peer's backoff is the point -- the backoff said "nobody answered",
   /// and a fresh packet from the peer is the counter-evidence.
-  void pokeFor(String callsign) {
+  ///
+  /// Returns true when the session lane has [callsign] in hand after this
+  /// tick -- a dial to it just went out, or a session with it is already up.
+  /// False means the radio is spoken for (another session, another dial in
+  /// flight, a backoff) and whatever the caller holds for this peer will not
+  /// move over a link right now.
+  bool pokeFor(String callsign) {
     final c = callsign.toUpperCase();
     _nextTry.remove(c);
     _backoff.remove(c);
     _onTick();
+    final mgr = MeshSessionManager.instance;
+    if (_dialing == c) return true;
+    final live = mgr.clientSession?.peerCallsign ?? mgr.servedSession?.peerCallsign;
+    return live != null && live.toUpperCase() == c;
   }
 
   void _onTick() {
@@ -251,6 +261,23 @@ class MeshTransferScheduler {
     final havePendingMsgs = store.ready && store.pendingCount() > 0;
     final havePendingBulk = spool.ready && spool.pendingCount() > 0;
     if (havePendingMsgs || havePendingBulk) {
+      // 1a) A 1:1 WE wrote, to a peer we can dial, goes before everything
+      // else. The loop below takes the first dialable peer that has anything
+      // owed to it, in registry order -- and a hub holding mail for half the
+      // street (the Hotwav on the bench: 75 pending, 144 hand-overs) wins
+      // that every tick, while the message the user just typed to the phone
+      // on the next desk waits behind a stranger's backlog. Measured: 86 s,
+      // delivered in the end by that hub carrying it.
+      if (havePendingMsgs) {
+        final self = MeshService.instance.tableCallsign;
+        for (final peer in dialable.keys) {
+          if (blocked(peer, toSend: true)) continue;
+          if (store.ownPendingTo(peer, selfCallsign: self)) {
+            _dialTo(peer, dial, 'deliver own 1:1');
+            return;
+          }
+        }
+      }
       for (final peer in dialable.keys) {
         if (blocked(peer, toSend: true)) continue;
         if (havePendingMsgs &&

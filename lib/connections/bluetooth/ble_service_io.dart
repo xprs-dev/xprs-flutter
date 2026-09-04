@@ -349,6 +349,7 @@ class BleService {
       _peerCaps[cs] = caps;
     };
     MeshSessionManager.instance.hooks.canTakeCustody = meshCanTakeCustody;
+    MeshSessionManager.instance.hooks.dialWorth = meshDialWorth;
     MeshTransferScheduler.instance.start();
   }
 
@@ -381,6 +382,25 @@ class BleService {
         DateTime.now().millisecondsSinceEpoch - p.ms < _meshPeerFreshMs;
     return MeshCustodyDelegate.pointToPointOk(
         dialableNow: fresh, peerCaps: _peerCaps[cs] ?? 0);
+  }
+
+  /// Is a 1:1 to [callsign] worth starting a session for right now? Fresh,
+  /// on an address that can actually be dialled (a beacon MAC cannot), and
+  /// not a peer that has said it does not take custody. See
+  /// `MeshCustodyDelegate.worthDialing`.
+  bool meshDialWorth(String callsign) {
+    final cs = callsign.toUpperCase();
+    final p = _meshPeers[cs];
+    if (p == null) return false;
+    final fresh =
+        DateTime.now().millisecondsSinceEpoch - p.ms < _meshPeerFreshMs;
+    final dialable = MeshCustodyDelegate.undialableReason(
+            callsign: cs, addr: p.addr, verifiedAddr: _verifiedAddr[cs]) ==
+        null;
+    return MeshCustodyDelegate.worthDialing(
+        dialableNow: fresh && dialable,
+        capsKnown: _peerCaps.containsKey(cs),
+        peerCaps: _peerCaps[cs] ?? 0);
   }
 
   /// Every callsign we have a capability record for: what it declared, and

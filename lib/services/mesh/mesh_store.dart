@@ -480,6 +480,19 @@ class MeshStore {
     return out;
   }
 
+  /// Do we hold a 1:1 WE wrote that is addressed to [target] itself? One
+  /// indexed row, asked as a yes/no (docs/performance.md 8.7).
+  bool ownPendingTo(String target, {required String selfCallsign}) {
+    final db = _db;
+    final t = target.trim().toUpperCase();
+    final self = selfCallsign.trim().toUpperCase();
+    if (db == null || t.isEmpty || self.isEmpty) return false;
+    return db.select(
+        'SELECT 1 FROM mesh_store WHERE state = 0 AND UPPER(target) = ? '
+        'AND UPPER(sender) = ? LIMIT 1',
+        [t, self]).isNotEmpty;
+  }
+
   /// Distinct targets of in-transit frames WE originated (custodian path).
   List<String> ownPendingTargets(String selfCallsign) {
     final db = _db;

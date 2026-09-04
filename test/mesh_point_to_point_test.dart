@@ -42,6 +42,37 @@ void main() {
     });
   });
 
+  group('a 1:1 is worth STARTING a session for', () {
+    test('a peer in reach whose caps we do not know yet', () {
+      // First contact: the advert still goes out, but the dial that records
+      // the caps -- and carries the message in ~2 s -- starts now, not after
+      // the second message.
+      expect(
+          MeshCustodyDelegate.worthDialing(
+              dialableNow: true, capsKnown: false, peerCaps: 0),
+          isTrue);
+    });
+    test('a peer that offered msgCustody', () {
+      expect(
+          MeshCustodyDelegate.worthDialing(
+              dialableNow: true, capsKnown: true, peerCaps: kPhoneCaps),
+          isTrue);
+    });
+    test('never a peer that declared caps without custody (a dongle)', () {
+      const dongle = MspCaps.bulkRx | MspCaps.bulkTx;
+      expect(
+          MeshCustodyDelegate.worthDialing(
+              dialableNow: true, capsKnown: true, peerCaps: dongle),
+          isFalse);
+    });
+    test('never a peer we cannot dial', () {
+      expect(
+          MeshCustodyDelegate.worthDialing(
+              dialableNow: false, capsKnown: false, peerCaps: 0),
+          isFalse);
+    });
+  });
+
   group('and must NOT, for anything else', () {
     test('a peer we have never held a session with', () {
       // No HELLO, no caps. The FIRST 1:1 to a peer is always aired; the session

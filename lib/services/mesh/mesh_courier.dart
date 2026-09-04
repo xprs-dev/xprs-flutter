@@ -669,7 +669,16 @@ class MeshCourier {
       // can still retry instead of collapsing into the dedup.
       if (_unresolved.length < 32 &&
           !_unresolved.any((u) => u.id == f.id)) {
-        _unresolved.add(_UnresolvedMail(f.id, f.from, body, via));
+        // Everything the direct delivery below hands to the inbox travels
+        // with the held record: the section 5 identifier (what a read receipt
+        // names), the sender's CALLSIGN (what the chat keys the conversation
+        // on), and the signature verdict. A held packet used to be delivered
+        // with none of them -- `call` empty -- and a chat that keeps to XPRS
+        // stations, rightly, dropped it at the door. Bench 2026-09-04: the
+        // message reached the phone in 43 s, waited 23 s for the key, and was
+        // then delivered to nobody.
+        _unresolved.add(_UnresolvedMail(
+            f.id, f.from, body, via, xprsIdentifier(p), sigState.name));
         _pump ??= Timer.periodic(const Duration(seconds: 5), (_) => _tick());
         LogService.instance.add(
             'Courier: holding a carried packet from ${f.from} until its '
@@ -809,8 +818,14 @@ class MeshCourier {
       final srcHex = RnsService.instance.lxmfDestForCallsign(u.from);
       if (srcHex.isEmpty) return false;
       _noteDelivered('id:${u.id}');
-      RnsService.instance
-          .injectLxmf(sourceHex: srcHex, content: u.body, title: '', via: u.via);
+      RnsService.instance.injectLxmf(
+          sourceHex: srcHex,
+          content: u.body,
+          title: '',
+          via: u.via,
+          id: u.packetId,
+          call: u.from,
+          sig: u.sig);
       MeshCourierCounters.ingested++;
       LogService.instance.add(
           'Courier: delivered a held packet from ${u.from} — its key arrived');
@@ -962,8 +977,13 @@ class _UnresolvedMail {
   final String from;
   final String body;
   final String via;
+  /// The section 5 identifier of the (reassembled) packet -- the inbox's
+  /// `id`, distinct from [id], which is the frame's own dedup key.
+  final String packetId;
+  final String sig;
   final DateTime since = DateTime.now();
-  _UnresolvedMail(this.id, this.from, this.body, this.via);
+  _UnresolvedMail(
+      this.id, this.from, this.body, this.via, this.packetId, this.sig);
 }
 
 class _Token {

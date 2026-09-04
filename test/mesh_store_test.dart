@@ -62,6 +62,30 @@ void main() {
         reason: 'the newest of our own must be in the first batch');
   });
 
+  test('ownPendingTo answers for our own 1:1 to that peer, and nothing else', () {
+    // The scheduler asks this before anything else on its tick: a 1:1 WE
+    // wrote to a peer we can dial goes ahead of a hub's backlog.
+    expect(store.ownPendingTo('X3ARK', selfCallsign: 'X1VCVM'), isFalse);
+    store.offer(
+        target: 'X3ARK',
+        sender: 'X1WATT',
+        wire: _wire('X1WATT', 'X3ARK', 'carried for somebody'),
+        am: 'theirs',
+        inTransit: true);
+    expect(store.ownPendingTo('X3ARK', selfCallsign: 'X1VCVM'), isFalse,
+        reason: 'a stranger\'s mail for the peer is not ours');
+    store.offer(
+        target: 'X3ARK',
+        sender: 'X1VCVM',
+        wire: _wire('X1VCVM', 'X3ARK', 'hello'),
+        am: 'mine',
+        inTransit: true);
+    expect(store.ownPendingTo('x3ark', selfCallsign: 'x1vcvm'), isTrue,
+        reason: 'case does not matter on either side');
+    expect(store.ownPendingTo('X1WATT', selfCallsign: 'X1VCVM'), isFalse,
+        reason: 'addressed to the peer itself, not merely routed through it');
+  });
+
   test('a stranger\'s mail still goes before our own', () {
     store.offer(
         target: 'X3ARK',
