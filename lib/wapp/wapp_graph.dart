@@ -225,25 +225,23 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     super.dispose();
   }
 
-  // Message [peerHex] (an LXMF delivery-dest hash): ALL chatting lives in the
-  // Chat wapp — this graph is a directory, not a messenger. Deep-link into the
-  // Chat wapp's LXMF conversation; it ensures/persists the thread and the same
-  // address receives the replies. (This used to open an in-graph chat panel —
-  // a second, worse copy of a conversation surface Chat already owns.)
-  void _openChat(String peerHex, {String name = ''}) {
-    if (peerHex.isEmpty) return;
-    final k = peerHex.toLowerCase();
+  // Message a station BY CALLSIGN: ALL chatting lives in the Chat wapp — this
+  // graph is a directory, not a messenger. A callsign is the one name a
+  // station has on every bearer (XPRS.md section 3); Chat hands it to the
+  // core's send door, which picks the lane and seals to the key it holds.
+  // Handing over an LXMF delivery hash instead named a transport, and named
+  // the one that cannot reach a station standing in the same room.
+  void _openChat(String callsign, {String name = ''}) {
+    final c = callsign.trim().toUpperCase();
+    if (c.isEmpty) return;
     final dir = '${installedAppsDirPath()}/chat';
-    // Carry the NAME. Without it the thread opened as "LXMF 85cdc031" one tap
-    // after the panel showed the peer as X16JK8 — the identity was known and
-    // then dropped on the doorstep.
     // ignore: discarded_futures
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => WappPage(
           wappDir: dir,
           title: name.isNotEmpty ? name : 'Chat',
-          initialConvo: 'lxmf:$k',
+          initialConvo: c,
           initialConvoName: name,
         ),
       ),
@@ -1861,17 +1859,18 @@ class _GraphViewState extends State<_GraphView> with TickerProviderStateMixin {
     ]);
   }
 
-  // Open (or start) an LXMF conversation with a graph node. The conversation is
-  // keyed by the node's LXMF delivery-dest — derived from its announced pubkey —
-  // so incoming replies (same address) land in the same thread.
+  // Open (or start) the Chat conversation with a graph node, keyed by its
+  // CALLSIGN (meta.callsign is on every XPRS node). The key the node announced
+  // is the core's to use when Chat asks for a sealed message; this panel only
+  // says who.
   void _messagePeer(RnsGraphNode n, String pubkey) {
-    final dest = RnsService.instance.lxmfDestForPubkey(pubkey);
-    if (dest == null) {
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(content: Text('No usable key for this device')));
+    final call = ((n.meta['callsign'] ?? '') as Object).toString().trim();
+    if (call.isEmpty) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(const SnackBar(
+          content: Text('This device has announced no callsign yet')));
       return;
     }
-    _openChat(dest, name: n.label.isNotEmpty ? n.label : _shorten(n.id));
+    _openChat(call, name: n.label.isNotEmpty ? n.label : call);
   }
 
   /// A key/value row whose value is a long identifier: monospace, wrapped, and
