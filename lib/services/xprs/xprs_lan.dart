@@ -279,5 +279,10 @@ class XprsLan {
         'tx': tx,
         'dropped': dropped,
         'peers': _peers.length,
+        // 0 subnets = no IPv4 interface found: the phone is not on a network,
+        // and every send fails "Network is unreachable". Bench 2026-09-05:
+        // this took a shell on the phone to see; it should take one curl.
+        'subnets': _directed.length,
+        'reopened': reopened,
       };
 }

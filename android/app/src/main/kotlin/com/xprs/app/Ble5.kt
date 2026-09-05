@@ -23,7 +23,10 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -98,6 +101,9 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
 
         // enableAdvertising takes its duration in 10 ms units.
         private const val ADV_WINDOW_UNITS = (ADV_WINDOW_MS / 10).toInt()
+        // How long a live set takes to answer an enable with
+        // onAdvertisingEnabled, generously. Measured well under 100 ms.
+        private const val ADV_ANSWER_MS = 2_000L
         // GATT parcel service (matches the ble_peripheral server + the old client).
         private val SVC_UUID  = UUID.fromString("0000ffe0-0000-1000-8000-00805f9b34fb")
         private val FFF1_UUID = UUID.fromString("0000fff1-0000-1000-8000-00805f9b34fb")
@@ -219,6 +225,35 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     // device could be mute for hours while reporting "advertising: true".
     @Volatile private var advOnAir = false
     private val advAttempts = java.util.concurrent.atomic.AtomicLong(0)
+
+    // ── The stack underneath us can die, and did ────────────────────────────
+    //
+    // 2026-09-04 22:55, TANK2: the controller stopped answering
+    // LE_SET_EXTENDED_ADVERTISING_ENABLE, com.android.bluetooth aborted on the
+    // HCI timeout and Android restarted it. This object kept its
+    // AdvertisingSet, whose binder now pointed at a dead process. Every
+    // setAdvertisingData on it logged a DeadObjectException INSIDE the
+    // framework and returned normally, so airData booked an airing, advOnAir
+    // stayed true and advLastError stayed null -- 13,593 "airings" and not one
+    // byte on the air, for a night. The scan survived only because its
+    // watchdog registers a fresh scanner after two minutes of silence.
+    //
+    // Two detectors, because the broadcast alone was not enough to trust:
+    // ACTION_STATE_CHANGED (OFF -> ON is exactly what a crash-restart goes
+    // through), and the callback the set owes us for every window we open
+    // (onAdvertisingEnabled). A set that stops answering is dropped and the
+    // next rotation starts a fresh one through the same start path.
+    private val adapterRestarts = java.util.concurrent.atomic.AtomicLong(0)
+    private val advDead = java.util.concurrent.atomic.AtomicLong(0)
+    @Volatile private var advWindowAskedAt = 0L
+    @Volatile private var advEnabledSeenAt = 0L
+    private val adapterReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+            val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+            bg.post { onAdapterState(state) }
+        }
+    }
     private val advFailures = java.util.concurrent.atomic.AtomicLong(0)
     private val scanResults = java.util.concurrent.atomic.AtomicLong(0)
 
@@ -287,6 +322,17 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     private var writeGen = 0
 
     init {
+        try {
+            val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+            if (Build.VERSION.SDK_INT >= 33) {
+                appContext.registerReceiver(adapterReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                appContext.registerReceiver(adapterReceiver, filter)
+            }
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "adapter state receiver not registered: ${e.message}")
+        }
         MethodChannel(messenger, METHOD_CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "supported" -> result.success(isSupported())
@@ -383,6 +429,7 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         disposed = true
         events = null
         gattEvents = null
+        try { appContext.unregisterReceiver(adapterReceiver) } catch (_: Exception) {}
         // Tear the radio down on the thread that owns it, then let that thread
         // finish: quitting the looper from here would abandon a half-stopped
         // scan and a GATT server nobody ever closes.
@@ -518,12 +565,83 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
     private fun openAdvWindow() {
         val set = advertisingSet ?: return // not started yet; start airs it once
         advWindowOpen = true
+        advWindowAskedAt = System.currentTimeMillis()
         try {
             // Duration is enforced by the controller: it stops on its own, so a
             // missed callback cannot leave us transmitting for the whole minute.
             set.enableAdvertising(true, ADV_WINDOW_UNITS, 0)
         } catch (_: Exception) {
             advWindowOpen = false
+        }
+        // The set owes us onAdvertisingEnabled for this. A set that never
+        // answers is a binder to a process that is no longer there.
+        bg.removeCallbacks(advWindowCheck)
+        bg.postDelayed(advWindowCheck, ADV_ANSWER_MS)
+    }
+
+    private val advWindowCheck = Runnable {
+        if (disposed) return@Runnable
+        val asked = advWindowAskedAt
+        if (asked == 0L || advertisingSet == null) return@Runnable
+        if (advEnabledSeenAt >= asked) return@Runnable
+        advDead.incrementAndGet()
+        android.util.Log.e(
+            TAG,
+            "advertising set stopped answering (enable asked " +
+                "${System.currentTimeMillis() - asked} ms ago, no callback) — dropping it",
+        )
+        dropDeadSet("set stopped answering")
+        if (frames.isNotEmpty()) rotateTick()
+    }
+
+    /**
+     * Forget the advertising set without forgetting what it was carrying.
+     *
+     * The frames and the rotation stay: the next tick reaches airData with no
+     * set, and airData's own start path creates a fresh one on a fresh
+     * advertiser proxy, carrying the current frame as its initial data. Nothing
+     * a caller registered is lost, and nothing is counted as aired meanwhile.
+     */
+    private fun dropDeadSet(reason: String) {
+        val cb = advertiseCallback
+        if (cb != null) {
+            try { adapter?.bluetoothLeAdvertiser?.stopAdvertisingSet(cb) } catch (_: Exception) {}
+        }
+        advertisingSet = null
+        advertiseCallback = null
+        lastHex = null
+        starting = false
+        advOnAir = false
+        advWindowOpen = false
+        advWindowAskedAt = 0L
+        advLastError = reason
+    }
+
+    /** Worker thread. What the adapter's own state broadcast tells us. */
+    private fun onAdapterState(state: Int) {
+        if (disposed) return
+        when (state) {
+            BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> {
+                if (advertisingSet != null || scanCallback != null) {
+                    android.util.Log.w(TAG, "adapter off — dropping the advertising set and the scan")
+                }
+                dropDeadSet("adapter off")
+                if (scanCallback != null) stopScan(stopWatchdog = false)
+            }
+            BluetoothAdapter.STATE_ON -> {
+                val n = adapterRestarts.incrementAndGet()
+                android.util.Log.w(TAG, "adapter on (#$n) — rebuilding the advertising set and the scan")
+                if (wantScan && scanCallback == null) {
+                    nextScanRetryAt = 0L
+                    startScan()
+                }
+                if (frames.isNotEmpty()) {
+                    ensureRotating()
+                    rotateTick()
+                    ensureAdvWindow()
+                }
+                emitGatt(mapOf("event" to "adapterRestarted", "restarts" to n))
+            }
         }
     }
 
@@ -570,7 +688,12 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
      */
     private fun airData(mfg: ByteArray): Boolean {
         if (disposed) return false
-        val advertiser = adapter?.bluetoothLeAdvertiser ?: return false
+        if (adapter?.state != BluetoothAdapter.STATE_ON) {
+            // A set we still hold belongs to a stack that is gone or going.
+            if (advertisingSet != null) dropDeadSet("adapter not on")
+            return false
+        }
+        val advertiser = adapter.bluetoothLeAdvertiser ?: return false
         val data = AdvertiseData.Builder()
             .addManufacturerData(COMPANY_ID, mfg)
             .setIncludeDeviceName(false)
@@ -620,6 +743,9 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
             .build()
         val cb = object : AdvertisingSetCallback() {
             override fun onAdvertisingEnabled(set: AdvertisingSet?, enable: Boolean, status: Int) {
+                // Any answer, enable or the duration's own disable, is proof
+                // the set is alive.
+                advEnabledSeenAt = System.currentTimeMillis()
                 // The controller stops on its own when the window's duration
                 // expires — this is the radio going back to listening.
                 advWindowOpen = enable && status == ADVERTISE_SUCCESS
@@ -895,6 +1021,11 @@ class Ble5(context: Context, messenger: BinaryMessenger) {
         "advAiredBySubtype" to airedBySubtype.mapKeys { it.key.toString() },
         "advAiredSuppressed" to airedSuppressed.get(),
         "advLastError" to advLastError,
+        // The stack underneath: how many times the adapter came (back) up
+        // while we were running, and how many sets stopped answering.
+        "adapterState" to adapter?.state,
+        "adapterRestarts" to adapterRestarts.get(),
+        "advDead" to advDead.get(),
         "scanResults" to scanResults.get(),
         "lastScanResultAgeMs" to
             (if (lastScanResultAt == 0L) null else System.currentTimeMillis() - lastScanResultAt),

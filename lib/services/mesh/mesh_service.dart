@@ -745,6 +745,14 @@ class MeshService {
   /// 4 bytes here and about 10 characters as text, and the bloom is a flat 128
   /// bytes, so at this controller's ceiling text fits either the routing table
   /// or the bloom and never both.
+  /// Put this station's beacon on the air now, on every lane it beacons on.
+  /// For the moment the radio underneath came back: the rotation's frames
+  /// were rebuilt from what was registered, but the beacon is re-registered
+  /// only every 30 s, and a neighbour that lost us should hear us first.
+  void reannounce() {
+    unawaited(_sendXprsBeacon());
+  }
+
   Future<void> _sendXprsBeacon() async {
     final t = _table;
     if (t == null || !_canAdvertise) return;

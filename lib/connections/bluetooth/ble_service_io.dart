@@ -608,6 +608,7 @@ class BleService {
       // advertising carries only the connectionless broadcast (APRS + RNS).
       Ble5Bus.instance
         ..onAdvertFailed = _onAdvertRefused
+        ..onAdapterRestarted = _onAdapterRestarted
         ..onGattConnected = _onNgConnected
         ..onGattDisconnected = _onNgDisconnected
         ..onGattData = _onNgClientData
@@ -680,6 +681,21 @@ class BleService {
       MeshService.instance.setCanAdvertise(false);
     }
   }
+
+  /// The Bluetooth stack was replaced underneath us (a crash-restart, or off
+  /// and on). Native has rebuilt the advertising set and the scan; what is
+  /// left to do is say so, and put this station's beacon back on the air now
+  /// rather than at the next 30 s tick — a neighbour that lost us for a night
+  /// should not wait another half minute.
+  void _onAdapterRestarted(int restarts) {
+    _adapterRestarts = restarts;
+    LogService.instance.add(
+        'BLE5: Bluetooth stack restarted (#$restarts) — advertising set and '
+        'scan rebuilt');
+    MeshService.instance.reannounce();
+  }
+
+  int _adapterRestarts = 0;
 
   /// Adverts have fallen back to the legacy 31-byte path. Separate from
   /// [_ble5], which governs the GATT stack — see [_onAdvertRefused].
@@ -1442,6 +1458,7 @@ class BleService {
         'busScanning': Ble5Bus.instance.scanning,
         'msSinceLastFrame': Ble5Bus.instance.msSinceLastFrame,
         'advertLegacy': _advertLegacy,
+        'adapterRestartsSeen': _adapterRestarts,
         'advertFailures': Ble5Bus.instance.advertFailures,
         if (Ble5Bus.instance.advertLastError != null)
           'busLastError': Ble5Bus.instance.advertLastError,

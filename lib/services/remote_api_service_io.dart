@@ -13,6 +13,7 @@ import 'dart:typed_data';
 import 'xprs/xprs_archive.dart';
 import 'xprs/xprs_bridge.dart';
 import 'xprs/xprs_ingest.dart';
+import 'xprs/xprs_lan.dart';
 import 'xprs/xprs_publisher.dart';
 import 'mesh/xblob_service.dart';
 import '../connections/bluetooth/ble5_bus.dart';
@@ -1892,6 +1893,9 @@ class RemoteApiService {
         // §31.1's budget and the one retry ledger. `deferrals` is the
         // observable that says the budget is alive — a budget nobody can see is
         // indistinguishable from a station that has gone quiet.
+        // The LAN bearer's own counters. It had them all along and nothing
+        // read them: a phone off its WiFi looked exactly like a quiet LAN.
+        'lan': XprsLan.instance.statusJson(),
         'airtime': XprsAirtime.instance.json,
         'retries': XprsRetryLedger.instance.json,
         'receipts': XprsReceiptCounters.json,
