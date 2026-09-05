@@ -73,6 +73,7 @@ import '../services/preferences_service.dart';
 import '../services/reticulum/rns_service.dart';
 import '../services/xprs/xprs_publisher.dart';
 import '../services/xprs/xprs_monitor.dart';
+import '../services/xprs/xprs_vocab.dart';
 import '../util/time_ago.dart';
 import '../services/wapp_unread_service.dart';
 import '../services/hero/hero_inbox.dart';
@@ -4125,20 +4126,18 @@ class _WappPageState extends State<WappPage>
     );
   }
 
-  /// Is there a Reticulum path to the peer of conversation [id] right now?
+  /// Is [id]'s peer being heard on the air right now?
   ///
-  /// A direct conversation is keyed `lxmf:<dest>`, so the destination is in the
-  /// id and nothing has to be resolved.
-  ///
-  /// The same freshness the conversation LIST already draws its green dot from
-  /// (the wapp reads it out of the people directory as `live`), so the two
-  /// agree. A cached path is NOT the test: a path can linger for a peer that
-  /// has gone, and be absent for one that is plainly here — being heard
-  /// recently is what decides whether a message leaves now or waits.
+  /// A chat conversation is keyed on the peer's CALLSIGN, so reachability is
+  /// "have we heard that station lately" — the same in-earshot set
+  /// hal_xprs_stations serves the wapp's people list from, so the header dot,
+  /// the rail dot and the list all agree. A cached path is NOT the test: a
+  /// path can linger for a peer that has gone, and be absent for one that is
+  /// plainly here — being heard recently is what decides the dot, and whether
+  /// a message leaves now or waits.
   bool _peerReachable(String id) {
-    final dest = id.startsWith('lxmf:') ? id.substring(5) : '';
-    if (dest.isEmpty) return false;
-    return RnsService.instance.lxmfPeerLive(dest);
+    if (id.isEmpty || id.startsWith('#')) return false;
+    return XprsMonitor.instance.heardRecently(id);
   }
 
   @override
@@ -7408,35 +7407,29 @@ class _WappPageState extends State<WappPage>
   /// Turn whatever the caller has — a callsign, an npub/hex key, or an id that
   /// is already a thread — into an id CHAT CAN ACTUALLY USE.
   ///
-  /// Chat renders and sends only `#group`, room and `lxmf:<dest>` threads (see
-  /// convo_msg / do_rooms_send in the wapp). Handing it a bare callsign
-  /// produced a row that opened empty and swallowed every send: the wapp got
-  /// `rooms_send`, found no `lxmf:` prefix, and dropped the message without a
-  /// word — "I press send and it disappears". Resolve to the peer's LXMF
-  /// delivery destination, exactly as the Reticulum graph's own chat button
-  /// does (wapp_graph.dart `_openChat`).
+  /// Chat is XPRS-only and keys every conversation on the peer's CALLSIGN (or
+  /// a `#room`/`#group`); it cannot render or send in an `lxmf:` id
+  /// (room_renderable, room.c). So a deep-link resolves to a callsign, never
+  /// an LXMF destination — a callsign the wapp opens and sends on straight
+  /// away (hal_xprs_message). An npub/hex is only usable if the network has
+  /// paired it with a callsign; without one there is nobody to XPRS-address,
+  /// and the caller is told rather than dropped into a dead thread.
   String? _chatThreadIdFor(String target) {
     final t = target.trim();
     if (t.isEmpty) return null;
-    // Already something Chat understands.
-    if (t.startsWith('lxmf:') || t.startsWith('#')) return t;
-    // A raw 16-byte delivery dest.
-    if (RegExp(r'^[0-9a-fA-F]{32}$').hasMatch(t)) {
-      return 'lxmf:${t.toLowerCase()}';
-    }
-    // Otherwise ask the directory that already pairs a peer with its LXMF
-    // delivery destination. Deriving the dest from a NOSTR key does NOT work:
-    // lxmfDestForPubkey wants the 64-byte RETICULUM identity key, and an npub
-    // is a 32-byte NOSTR key — feeding it one returns null, which is why
-    // "Chat" from a profile silently did nothing.
+    // A room/group id is already what chat uses.
+    if (t.startsWith('#')) return t;
+    // A callsign is the id: chat keys on it directly.
+    if (xprsAddressesStation(t)) return t.toUpperCase();
+    // An npub or a raw key: usable only if the directory pairs it with a
+    // callsign the radios can address. No callsign -> no XPRS conversation.
     final wanted = t.toUpperCase();
     for (final e in RnsService.instance.messagingDirectory('')) {
-      final dest = (e['dest'] ?? '').toString();
-      if (dest.isEmpty) continue;
-      final call = (e['callsign'] ?? '').toString().toUpperCase();
+      final call = (e['callsign'] ?? '').toString().trim();
+      if (call.isEmpty) continue;
       final npub = (e['npub'] ?? '').toString();
-      if (call == wanted || (npub.isNotEmpty && npub == t)) {
-        return 'lxmf:${dest.toLowerCase()}';
+      if (call.toUpperCase() == wanted || (npub.isNotEmpty && npub == t)) {
+        return call.toUpperCase();
       }
     }
     return null;

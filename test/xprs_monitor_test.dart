@@ -222,4 +222,36 @@ void main() {
       expect(m.revision, greaterThan(before));
     });
   });
+
+  group('heardRecently — the chat presence dot', () {
+    // The dot means "are we getting this callsign's packets now", sourced from
+    // the same in-earshot set as hal_xprs_stations. A message from a station
+    // makes it true; an unheard callsign is false; it goes false past the
+    // window; and it is base + case-insensitive.
+    XprsPacket msg(String from) => p(
+        't:message f:$from d:X1A67X ts:2026-09-05_08:00:00 m:hi');
+
+    test('a station heard on the air is reachable', () {
+      final m = XprsMonitor.instance;
+      m.offer(msg('X3DCK0'), bearer: 'ble', selfCallsign: 'X1A67X', nowMs: 1000);
+      expect(m.heardRecently('X3DCK0', nowMs: 1000), isTrue);
+      expect(m.heardRecently('x3dck0', nowMs: 1000), isTrue,
+          reason: 'case-insensitive');
+      expect(m.heardRecently('X3DCK0-2', nowMs: 1000), isTrue,
+          reason: 'base match: a suffix is the same person');
+    });
+
+    test('a callsign never heard is not reachable', () {
+      final m = XprsMonitor.instance;
+      m.offer(msg('X3DCK0'), bearer: 'ble', selfCallsign: 'X1A67X', nowMs: 1000);
+      expect(m.heardRecently('X1ZZZZ', nowMs: 1000), isFalse);
+    });
+
+    test('a station quiet past the window is not reachable', () {
+      final m = XprsMonitor.instance;
+      m.offer(msg('X3DCK0'), bearer: 'ble', selfCallsign: 'X1A67X', nowMs: 1000);
+      final later = 1000 + XprsMonitor.staleAfter.inMilliseconds + 1;
+      expect(m.heardRecently('X3DCK0', nowMs: later), isFalse);
+    });
+  });
 }

@@ -392,6 +392,25 @@ class XprsMonitor {
     return fresh.map((s) => s.callsign).toList();
   }
 
+  /// Is [call] a station we have heard on ANY bearer within [within]?
+  ///
+  /// The chat's presence dot: "are we getting this callsign's packets right
+  /// now". Base + case-insensitive, because a conversation is keyed on the
+  /// bare callsign while a sighting may carry a `-suffix`. Reads the same
+  /// `_stations` set hal_xprs_stations serves, so the header dot, the rail
+  /// dot and the wapp's people list all agree. Not a path lookup: a cached
+  /// route outlives the peer, and being heard is what decides the dot.
+  bool heardRecently(String call, {Duration within = staleAfter, int? nowMs}) {
+    final want = call.trim().toUpperCase().split('-').first;
+    if (want.isEmpty) return false;
+    final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+    for (final s in _stations.values) {
+      if (s.callsign.toUpperCase().split('-').first != want) continue;
+      if (s.bearersFresh(now, within.inMilliseconds).isNotEmpty) return true;
+    }
+    return false;
+  }
+
   /// What the archive made of a packet's signature (section 9.1).
   ///
   /// Fed by [XprsArchive], which verifies at flush — deliberately off the

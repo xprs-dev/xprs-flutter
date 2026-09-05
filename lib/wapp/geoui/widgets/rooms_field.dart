@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../conversation_store.dart';
+import '../../../services/xprs/xprs_monitor.dart';
 import 'chat_view_field.dart';
 import 'people_view_field.dart';
 
@@ -300,7 +301,10 @@ class _RoomsFieldState extends State<RoomsField> {
         (r['unread'] as num?)?.toInt() ?? widget.store.items[id]?.unread ?? 0;
     final selected = r['selected'] == true || id == widget.openId;
     final item = widget.store.items[id];
-    final live = r['live'] == true;
+    // Reachability is the core's, not the wapp's: a callsign room is "live"
+    // when that station is being heard on the air now (the same set the
+    // header dot and hal_xprs_stations use); a '#room' has no single peer.
+    final live = !id.startsWith('#') && XprsMonitor.instance.heardRecently(id);
 
     // The second line: what was last said here, else what this place IS.
     // "N people seen" is the wapp's count of DISTINCT senders observed — never
@@ -571,23 +575,14 @@ class _RoomsFieldState extends State<RoomsField> {
     // Who you are talking to. The store title is the display name.
     //
     // A ROOM gets this header: it names the room and opens the member list.
-    // A 1:1 does not. The AppBar directly above already shows the callsign, so
-    // the header repeated it in a smaller font with the LXMF address beneath —
-    // two titles for one conversation, and an address nobody can do anything
-    // with. A person is identified by their callsign here; the address is
-    // plumbing (it is still on the row in "New chat", where you are choosing
-    // BETWEEN addresses and it is the only thing that tells them apart).
-    final isLxmf = (open ?? '').startsWith('lxmf:');
+    // A 1:1 does not: the AppBar already shows the callsign, and a chat
+    // conversation is identified by that callsign — there is no address to
+    // show and nothing to resolve.
     // Every room and channel id starts with '#', including the scope room
-    // (#LOCAL). Anything else is a conversation with one person.
+    // (#LOCAL). Anything else is a conversation with one person (a callsign).
     final isDirect = open != null && !open.startsWith('#');
-    final addr = isLxmf ? open!.substring(5) : '';
     var name = room?.title ?? '';
-    if (name.isEmpty) {
-      name = isLxmf
-          ? 'LXMF ${addr.length > 8 ? addr.substring(0, 8) : addr}'
-          : (open ?? '');
-    }
+    if (name.isEmpty) name = open ?? '';
     return Column(
       children: [
         // room header: who + members toggle (and, on a narrow window where the
