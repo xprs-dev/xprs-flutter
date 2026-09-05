@@ -60,6 +60,12 @@ class WappDelivery {
   static int published = 0;
   static int noSubscriber = 0;
 
+  /// Bodies refused because they are an XPRS wire, not a person's words. The
+  /// rule that PROTOCOL NEVER REACHES A PERSON lives here, on the one door
+  /// every wapp reads a message from, so both the radio lane (MeshCourier)
+  /// and the LXMF lane (_admitToInbox) are held to it once.
+  static int refusedProtocol = 0;
+
   /// Test seam: what was published, without standing up an engine.
   static void Function(String topic, Map<String, dynamic> row)? onPublish;
 
@@ -194,7 +200,7 @@ class WappDelivery {
   /// what §13.7 puts in a receipt's `r:`, so a wapp reporting "a person read
   /// this" has something to name.
   int deliverMessage({
-    required String from,
+    String from = '',
     required String content,
     String title = '',
     String bearer = 'rns',
@@ -202,8 +208,15 @@ class WappDelivery {
     String id = '',
     String call = '',
     String sig = '',
-  }) =>
-      _publish(rxTopicFor('message'), {
+  }) {
+    // An XPRS wire is protocol, not correspondence: a `t:...`/`x:...` body
+    // that leaked this far is a bug upstream, and it must never surface as a
+    // chat bubble. Refused here, once, for every lane.
+    if (xprsLooksLikeWire(content)) {
+      refusedProtocol++;
+      return 0;
+    }
+    return _publish(rxTopicFor('message'), {
         'id': id,
         'type': 'message',
         'from': from,
@@ -224,6 +237,7 @@ class WappDelivery {
         'bearer': bearer,
         'rssi': 0,
       });
+  }
 
   /// The fate of a message THIS station sent: delivered, read.
   ///
@@ -254,6 +268,7 @@ class WappDelivery {
   }
 
   static void debugReset() {
+    refusedProtocol = 0;
     published = 0;
     noSubscriber = 0;
     partsHeld = 0;

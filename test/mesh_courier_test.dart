@@ -2,8 +2,9 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:xprs/services/mesh/mesh_courier.dart';
-import 'package:xprs/services/reticulum/rns_service.dart';
+import 'package:xprs/services/receive/wapp_delivery.dart';
 import 'package:xprs/services/xprs/xprs_vocab.dart';
+import 'package:xprs/wapp/wapp_event_broker.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 Uint8List wire(String from, String to, String text) =>
@@ -55,33 +56,47 @@ void main() {
     });
   });
 
-  group('the inbox door keeps the time a carried message was written', () {
-    // The wire stamps `ts:` (section 4.8) and custody carries it unchanged;
-    // the inbox row used to say "now" regardless, so a message that spent a
-    // night in a custodian's pocket was dated at breakfast.
-    const src = '23698e7593f05e2053f5183580e2cf98';
+  group('the wapp door: an XPRS message, by callsign, no LXMF', () {
+    final bus = WappEventBroker.instance;
 
-    test('a packet ts: reaches the row as epoch seconds', () {
-      final written = xprsParseTs('2026-08-08_14:26:40')!;
-      RnsService.instance.injectLxmf(
-          sourceHex: src,
-          content: 'written yesterday, carried today',
-          call: 'X1A67X',
-          id: 'a1b2c3',
-          tsMs: written);
-      final row = RnsService.instance.lxmfInbox.last;
-      expect(row['content'], 'written yesterday, carried today');
-      expect((row['ts'] as double) * 1000, written.toDouble(),
-          reason: 'the bubble shows when it was said, not when it arrived');
+    setUp(() {
+      for (final id in bus.registeredEngines().toList()) {
+        bus.unregisterEngine(id);
+      }
+      WappDelivery.debugReset();
+      bus.registerEngine('chat');
+      bus.subscribe('chat', rxTopicFor('message'));
     });
 
-    test('a wire with no stamp is dated by its arrival', () {
-      final before = DateTime.now().millisecondsSinceEpoch;
-      RnsService.instance
-          .injectLxmf(sourceHex: src, content: 'no ts on this one');
-      final row = RnsService.instance.lxmfInbox.last;
-      expect((row['ts'] as double) * 1000,
-          greaterThanOrEqualTo(before.toDouble()));
+    test('a station 1:1 is delivered with its callsign, ts and sig — no hex',
+        () {
+      final n = WappDelivery.instance.deliverMessage(
+          call: 'X3DCK0',
+          content: 'from a keyboard station',
+          bearer: 'ble',
+          id: 'a1b2c3',
+          sig: 'unsigned',
+          ts: xprsParseTs('2026-09-05_08:00:00')! / 1000.0);
+      expect(n, 1, reason: 'the chat engine asked for this topic');
+      final row = jsonDecode(bus.recv('chat')!.data) as Map<String, dynamic>;
+      expect(row['call'], 'X3DCK0');
+      expect(row['from'], '', reason: 'no LXMF destination is involved');
+      expect(row['content'], 'from a keyboard station');
+      expect(row['bearer'], 'ble', reason: 'the only word chat learns about how it travelled');
+      expect(row['sig'], 'unsigned',
+          reason: 'unsigned still reaches a person (XPRS.md §9.1)');
+      expect(row['id'], 'a1b2c3');
+    });
+
+    test('a body that is itself an XPRS wire never reaches a person', () {
+      final before = WappDelivery.refusedProtocol;
+      final n = WappDelivery.instance.deliverMessage(
+          call: 'X3DCK0',
+          content: 't:message f:X3DCK0 d:X1WATT m:leaked wire',
+          bearer: 'ble');
+      expect(n, 0);
+      expect(WappDelivery.refusedProtocol, before + 1);
+      expect(bus.queueDepth('chat'), 0);
     });
   });
 }

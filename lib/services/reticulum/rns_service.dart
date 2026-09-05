@@ -2304,59 +2304,6 @@ class RnsService {
     return _derivedCallsign(pub);
   }
 
-  /// Hand the wapps a message that reached us over a path Reticulum knows
-  /// nothing about — carried by a custodian on the mesh (see MeshCourier).
-  /// It enters the SAME inbox a directly-delivered LXMF message does, so the
-  /// wapp that owns the conversation needs no notion of how it travelled.
-  /// [id] is the §5 identifier of the packet this text came out of, when it
-  /// came out of one. It travels to the wapp with the message because §13.7's
-  /// read receipt names it in `r:` — a wapp that cannot name the message it
-  /// has just shown somebody cannot report that it was read, which is how a
-  /// wapp ends up inventing a correlation id of its own.
-  ///
-  /// [tsMs] is the packet's own `ts:` (§4.8), epoch milliseconds. A carried
-  /// message is dated by the moment it was WRITTEN, never by the moment the
-  /// last hop handed it over: the sender stamps every 1:1 and the stamp
-  /// survives custody unchanged (§9.3 signs over it), and this door was the
-  /// one place it was thrown away -- the row said "now", the bubble showed
-  /// the arrival, and a message that spent a night in a custodian's pocket
-  /// read as if it had been sent at breakfast. The LXMF lane already passes
-  /// the envelope's time; this is the courier's equivalent. Arrival is the
-  /// fallback for a wire that carries no stamp.
-  void injectLxmf({
-    required String sourceHex,
-    required String content,
-    String title = '',
-    String via = 'mesh',
-    String id = '',
-    String call = '',
-    String sig = '',
-    int? tsMs,
-  }) {
-    if (sourceHex.isEmpty || content.isEmpty) return;
-    final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final atMs = tsMs ?? nowMs;
-    if (!_admitToInbox({
-      'from': sourceHex,
-      'title': title,
-      'content': content,
-      'hash': '',
-      'ts': atMs / 1000.0,
-      'via': via,
-      'id': id,
-      'call': call,
-      'sig': sig,
-    })) {
-      return;
-    }
-    _recordLxmf(sourceHex,
-        incoming: true, text: content, title: title, tsMs: atMs);
-    _notifyLxmf();
-    LogService.instance
-        .add('LXMF: carried message from ${sourceHex.substring(0, 8)} '
-            '(via $via)');
-  }
-
   /// Protocol wires refused at the inbox door, for the diagnostics.
   int inboxRefusedProtocol = 0;
 

@@ -58,6 +58,7 @@ import '../../util/nostr_crypto.dart';
 import '../log_service.dart';
 import '../../profile/profile_service.dart';
 import '../reticulum/rns_service.dart';
+import '../receive/wapp_delivery.dart';
 import '../xprs/xprs_vocab.dart';
 import '../xprs/xprs_ingest.dart';
 import '../xprs/xprs_body.dart';
@@ -205,8 +206,7 @@ class MeshCourier {
   }
 
   void _tick() {
-    _retryUnresolved();
-    if (_armed.isEmpty && _unresolved.isEmpty) {
+    if (_armed.isEmpty) {
       _pump?.cancel();
       _pump = null;
       return;
@@ -321,7 +321,6 @@ class MeshCourier {
     _pump?.cancel();
     _pump = null;
     _armed.clear();
-    _unresolved.clear();
   }
 
   /// The bytes to carry when [text] is ALREADY a finished packet, or null
@@ -452,7 +451,7 @@ class MeshCourier {
   /// The split exists because the funnel is now the thing that calls this.
   /// [XprsIngest.heard] is the one surface every bearer reaches — BLE 0x58,
   /// BLE 0x41, LAN UDP, TCP — and until now it archived a message addressed to
-  /// us and delivered nothing, because the only route to [RnsService.injectLxmf]
+  /// us and delivered nothing, because the only route to the wapp door
   /// ran through the 0x41 handler's custody tap. A station replaying our mail
   /// on 0x58, which is what every history replay is, dead-ended in the spool.
   /// Calling [ingest] from the funnel would recurse, since [_ingestXprs] starts
@@ -481,7 +480,7 @@ class MeshCourier {
 
     // Only a person's text reaches a person.
     //
-    // This function ends in RnsService.injectLxmf, which is the inbox chat
+    // This function ends in WappDelivery.deliverMessage, which the chat
     // renders as correspondence and notifies on — so whatever arrives here
     // becomes a chat bubble and an Android notification titled with the
     // sender's callsign. A `cmd:history` ask, a `t:result`, a receipt or an
@@ -498,7 +497,7 @@ class MeshCourier {
     //
     // Neither guard already in the tree could catch it: the host's LXMF filter
     // sits on the RECEIVE side, and chat's own `t:` prefix test cannot help
-    // because injectLxmf passes the bare `m:` VALUE, not the wire.
+    // because the wapp door is passed the bare `m:` VALUE, not the wire.
     //
     // Not sos or warning, though both are worth a person's attention: 13.1
     // gives them nine relays precisely so they are AIRED rather than carried,
@@ -657,36 +656,6 @@ class MeshCourier {
     // still collapse onto one entry, they just do it before paying for a
     // signature verify and an unseal.)
 
-    // No `sd:` to trust: the sender's delivery address is derived from the key
-    // they published, which cannot be forged without the private half.
-    final srcHex = RnsService.instance.lxmfDestForCallsign(f.from);
-    if (srcHex.isEmpty) {
-      // The author's key is not resolvable RIGHT NOW — which is the ordinary
-      // case for carried mail: it arrives precisely because the sender is
-      // away. Dropping here lost the message forever (the custodian archived
-      // its copy on our ack). Hold it and retry when the sender's announce
-      // returns. Nothing was remembered above, so a later custody redelivery
-      // can still retry instead of collapsing into the dedup.
-      if (_unresolved.length < 32 &&
-          !_unresolved.any((u) => u.id == f.id)) {
-        // Everything the direct delivery below hands to the inbox travels
-        // with the held record: the section 5 identifier (what a read receipt
-        // names), the sender's CALLSIGN (what the chat keys the conversation
-        // on), and the signature verdict. A held packet used to be delivered
-        // with none of them -- `call` empty -- and a chat that keeps to XPRS
-        // stations, rightly, dropped it at the door. Bench 2026-09-04: the
-        // message reached the phone in 43 s, waited 23 s for the key, and was
-        // then delivered to nobody.
-        _unresolved.add(_UnresolvedMail(f.id, f.from, body, via,
-            xprsIdentifier(p), sigState.name, xprsParseTs(p['ts'])));
-        _pump ??= Timer.periodic(const Duration(seconds: 5), (_) => _tick());
-        LogService.instance.add(
-            'Courier: holding a carried packet from ${f.from} until its '
-            'key is heard (${_unresolved.length} waiting)');
-      }
-      return false;
-    }
-
     // A CARRIED BODY THAT IS ITSELF A WIRE IS PROTOCOL, NOT CORRESPONDENCE.
     //
     // The courier carries whatever it was given, and what it is given is
@@ -750,19 +719,19 @@ class MeshCourier {
           'Courier: #$_delivered to a person from ${f.from} '
           '(${body.length}B of text)');
     }
-    RnsService.instance.injectLxmf(
-        sourceHex: srcHex,
-        content: body,
-        title: '',
-        via: via,
-        // The packet this text came out of — reassembled and unsealed, so this
-        // is the identifier the SENDER's outbox is keyed on and the one a read
-        // receipt has to name.
-        id: xprsIdentifier(p),
+    // STRAIGHT TO THE WAPP DOOR. An XPRS message is addressed by CALLSIGN and
+    // carries no LXMF anything; the core owns the one door every wapp reads
+    // from (WappDelivery), and the bearer it arrived on is the only word the
+    // wapp learns about how it travelled. The `ts:` is the sender's (§4.8),
+    // the id is the §5 identifier a read receipt names, and `sig:` is §9.1's
+    // verdict — optional, so unsigned still reaches a person.
+    WappDelivery.instance.deliverMessage(
         call: f.from,
+        content: body,
+        bearer: via,
+        id: xprsIdentifier(p),
         sig: sigState.name,
-        // When it was written (section 4.8), not when it got here.
-        tsMs: xprsParseTs(p['ts']));
+        ts: xprsParseTs(p['ts']));
     // REMEMBER it. `_alreadyDelivered` is checked on the way in, but nothing
     // ever recorded the delivery, so the guard read a flag no one set and the
     // same packet was delivered again on every arrival — once per bearer, and
@@ -805,35 +774,6 @@ class MeshCourier {
     XprsReceiptCounters.sent++;
     unawaited(XprsPublisher.instance.publishWire(r.encode(),
         slot: 'ack:${r['r']}', verbatim: true));
-  }
-
-  /// Carried mail whose author we cannot address yet. Retried from [_tick];
-  /// a day is plenty — after that the sender is not coming back soon and the
-  /// content is only growing stale.
-  final List<_UnresolvedMail> _unresolved = [];
-
-  void _retryUnresolved() {
-    if (_unresolved.isEmpty) return;
-    final now = DateTime.now();
-    _unresolved.removeWhere((u) {
-      if (now.difference(u.since) > const Duration(hours: 24)) return true;
-      final srcHex = RnsService.instance.lxmfDestForCallsign(u.from);
-      if (srcHex.isEmpty) return false;
-      _noteDelivered('id:${u.id}');
-      RnsService.instance.injectLxmf(
-          sourceHex: srcHex,
-          content: u.body,
-          title: '',
-          via: u.via,
-          id: u.packetId,
-          call: u.from,
-          sig: u.sig,
-          tsMs: u.tsMs);
-      MeshCourierCounters.ingested++;
-      LogService.instance.add(
-          'Courier: delivered a held packet from ${u.from} — its key arrived');
-      return true;
-    });
   }
 
   /// A frame addressed to us arrived — overheard on air, or handed over by a
@@ -907,26 +847,9 @@ class MeshCourier {
     if (_alreadyDelivered(key)) return false;
     _noteDelivered(key);
 
-    // Key the conversation by the sender's LXMF delivery address, so it lands
-    // in the thread the user already has with that person rather than opening a
-    // callsign-shaped one nothing can render. `sd:` is what the sender told us;
-    // failing that, what our own directory knows about that callsign.
-    final srcHex = (sd?.value.isNotEmpty == true)
-        ? sd!.value
-        : RnsService.instance.lxmfDestForCallsign(from);
-    if (srcHex.isEmpty) {
-      MeshCourierCounters.ingestDropped++;
-      LogService.instance.add(
-          'Courier: message from $from with no address to answer — dropped');
-      return false;
-    }
-
-    RnsService.instance.injectLxmf(
-      sourceHex: srcHex,
-      content: body,
-      title: '',
-      via: via,
-    );
+    // By CALLSIGN, straight to the wapp door — the compact frame is an XPRS
+    // message like any other and needs no LXMF address to be shown.
+    WappDelivery.instance.deliverMessage(call: from, content: body, bearer: via);
     MeshCourierCounters.ingested++;
     LogService.instance
         .add('Courier: delivered a carried message from $from (via $via)');
@@ -973,24 +896,6 @@ class MeshCourier {
   }
 }
 
-/// One carried packet delivered to us whose author's key was unknown at the
-/// time — held by [MeshCourier] and retried until the key is heard.
-class _UnresolvedMail {
-  final String id;
-  final String from;
-  final String body;
-  final String via;
-  /// The section 5 identifier of the (reassembled) packet -- the inbox's
-  /// `id`, distinct from [id], which is the frame's own dedup key.
-  final String packetId;
-  final String sig;
-  /// The packet's own `ts:` in epoch ms -- a message held a day for its
-  /// author's key keeps the day it was written.
-  final int? tsMs;
-  final DateTime since = DateTime.now();
-  _UnresolvedMail(this.id, this.from, this.body, this.via, this.packetId,
-      this.sig, this.tsMs);
-}
 
 class _Token {
   _Token(this.value, this.rest);
