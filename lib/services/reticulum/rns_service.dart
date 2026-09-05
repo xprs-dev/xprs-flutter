@@ -2111,6 +2111,19 @@ class RnsService {
     if (d.length != 32 || c.isEmpty) return;
     _lxmfCallsignAt[d] = DateTime.now().millisecondsSinceEpoch;
     if (_lxmfCallsign[d] == c) return;
+    // ONE TRUSTED DEST PER CALLSIGN. This map is the station's own `lx:`
+    // statement of where to write to it, and the send resolver treats a dest
+    // named here as authoritative for the callsign. A station that changed
+    // identity (a recreated profile, a new dest) beacons its NEW dest -> we
+    // bind it here, but the OLD `oldDest -> X1WATT` row stayed, leaving two
+    // "trusted" dests for one callsign and the send racing between them (bench
+    // 2026-09-05: sends went to a dead old dest while the live one sat unused).
+    // The callsign has one current address; drop any prior dest that named it.
+    _lxmfCallsign.removeWhere((dest, name) {
+      final drop = name == c && dest != d;
+      if (drop) _lxmfCallsignAt.remove(dest);
+      return drop;
+    });
     if (_lxmfCallsign.length >= _maxLxmfCallsigns) {
       final oldest = _lxmfCallsign.keys.first;
       _lxmfCallsign.remove(oldest);
@@ -2235,14 +2248,55 @@ class RnsService {
   String lxmfDestForCallsign(String callsign) {
     final want = _bareUpper(callsign);
     if (want.isEmpty) return '';
+
+    // SELECT THE RIGHT DEST, NOT THE FIRST ONE HEARD.
+    //
+    // A callsign names ONE identity, and the LXMF dest is a pure function of
+    // that identity's key (`_lxmfDestHexForPub`). But the observed table can
+    // hold two entries wearing the same name -- an old identity (a recreated
+    // profile) or a stranger who set that display name (36.12.2) -- and the
+    // old code returned whichever was inserted first, with no recency, no key
+    // check and no path test. A peer that changed networks or reinstalled then
+    // became unreachable: every send resolved a dead dest, held for relay,
+    // retried forever (bench 2026-09-05: 49 messages queued to a hash nothing
+    // had a path to, while the live dest sat unused). So: rank the candidates.
+    //
+    //   1. a dest the station ITSELF paired to this callsign in its signed
+    //      `lx:` beacon (`_lxmfCallsign`, section 10.6 -- "the one place that
+    //      pairing is free and authoritative") beats a bare observed-name
+    //      match, which any announce can wear (36.12.2);
+    //   2. among equal trust, the FRESHEST sighting (lastSeenMs) -- the device
+    //      currently on the air, not an old identity's ghost;
+    //   3. among equally fresh, one we currently have a PATH to.
+    //
+    // The callsign is NOSTR-derived while an observed node's key is the
+    // RETICULUM identity, so the two cannot be checked against each other; the
+    // station's own `lx:` statement is the trust signal instead.
+    String? best;
+    int bestScore = -1;
+    int bestSeen = -1;
     for (final n in _observed.values) {
       final named = _bareUpper(n.callsign ?? '') == want ||
           _bareUpper(n.lxmfName ?? '') == want;
       if (!named) continue;
       final d = _lxmfDestHexForPub(n.publicKeyHex);
-      if (d.isNotEmpty) return d;
+      if (d.isEmpty) continue;
+      final trusted = _bareUpper(_lxmfCallsign[d.toLowerCase()] ?? '') == want;
+      final score = (trusted ? 2 : 0) | (hasPathTo(d) ? 1 : 0);
+      if (score > bestScore ||
+          (score == bestScore && n.lastSeenMs > bestSeen)) {
+        best = d;
+        bestScore = score;
+        bestSeen = n.lastSeenMs;
+      }
     }
+    if (best != null) return best;
+
     // Off the air right now, or announced with no app-data we could parse.
+    // The on-disk directory is the last resort and is NOT authoritative over a
+    // live announce -- reached only when nothing is observed. It still keeps
+    // one row per callsign (see rememberLxmfIdentity), so there is no stale
+    // twin to pick the wrong one from.
     if (!_lxmfDirLoaded) {
       _lxmfDirLoaded = true;
       _loadLxmfDirectory();
@@ -6946,18 +7000,34 @@ class RnsService {
     final k = destHex.trim().toLowerCase();
     final c = callsign.trim();
     if (k.isEmpty || c.isEmpty || _lxmfNames[k] == c) return;
+    // ONE DEST PER CALLSIGN. A callsign is one identity, and the fallback
+    // resolver returns the first directory row that matches the name. If a
+    // peer changes identity (a recreated profile) its old dest lingered here
+    // forever -- a dead hash the send path would pick when the peer was off
+    // the air -- because the dedup only dropped the row for the SAME dest.
+    // Drop every prior row for THIS callsign as well, in memory and on disk,
+    // so a changed dest cannot leave an immortal twin.
+    final cUp = _bareUpper(c);
+    _lxmfNames.removeWhere((dest, name) => _bareUpper(name) == cUp);
     _lxmfNames[k] = c;
     final prefs = PreferencesService.instanceSync;
     if (prefs == null) return;
     final keep = <String>[
       for (final row in prefs.lxmfDirectory)
-        if (!row.startsWith('$k|')) row,
+        if (!row.startsWith('$k|') && !_rowNamesCallsign(row, cUp)) row,
       '$k|$c',
     ];
     // Bounded: a busy hub can announce thousands of peers, and this is a
     // convenience directory, not a database.
     prefs.lxmfDirectory =
         keep.length <= 500 ? keep : keep.sublist(keep.length - 500);
+  }
+
+  /// True when a `dest|callsign` directory row names [wantBareUpper].
+  static bool _rowNamesCallsign(String row, String wantBareUpper) {
+    final i = row.indexOf('|');
+    if (i <= 0) return false;
+    return _bareUpper(row.substring(i + 1)) == wantBareUpper;
   }
 
   void _loadLxmfDirectory() {
