@@ -6,9 +6,14 @@ import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:hex/hex.dart';
+import 'package:xprs/services/xprs/xprs_archive.dart';
+import 'package:xprs/services/xprs/xprs_groups.dart';
+import 'package:xprs/services/xprs/xprs_id.dart';
 import 'package:xprs/services/xprs/xprs_packet.dart';
 import 'package:xprs/services/xprs/xprs_publisher.dart';
 import 'package:xprs/services/xprs/xprs_sig.dart';
+import 'package:xprs/util/nostr_crypto.dart';
 import 'package:pointycastle/ecc/curves/secp256k1.dart';
 
 class _FakeBearer implements XprsBearer {
@@ -42,6 +47,69 @@ void main() {
   _oversizeWires();
   _pathChoice();
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  // A grant used to fan out to the EXISTING members only, so the person being
+  // invited — role `invited`, and therefore skipped — never received their own
+  // offer unless they overheard the radio copy. A phone on cellular could not
+  // be invited at all. The act's own `grant:`/`revoke:` names are targets.
+  test('a group act names the people it is about (26.3.1: the offer must '
+      'reach the invitee)', () {
+    final grant = XprsPacket.parse(
+        't:moderate f:X5A3F2 d:X5A3F2 ts:2026-08-08_14:26:40 '
+        'grant:X1RD89,x32dva role:member')!;
+    expect(XprsPublisher.namedInAct(grant), ['X1RD89', 'X32DVA']);
+    final revoke = XprsPacket.parse(
+        't:moderate f:X5A3F2 d:X5A3F2 ts:2026-08-08_14:26:40 revoke:X1PZ4Q')!;
+    expect(XprsPublisher.namedInAct(revoke), ['X1PZ4Q']);
+    // A post to the group names nobody: members only, as before.
+    final post = XprsPacket.parse(
+        't:message f:X1RD89 d:X5A3F2 ts:2026-08-08_14:26:40 m:hello')!;
+    expect(XprsPublisher.namedInAct(post), isEmpty);
+    expect(XprsPublisher.namedInAct(null), isEmpty);
+  });
+
+  // 26.7's sending side, decided in the core for every caller: a post to a
+  // closed group this station is proven not to belong to is not aired. A
+  // roster we cannot verify refuses nothing.
+  test('mayAir: a non-member\'s post to a closed group is refused; '
+      'a member\'s and an unverifiable one are not', () {
+    final g = XprsGroups.instance;
+    g.clear();
+    final keys = <String, ({BigInt d, Uint8List pub})>{};
+    ({BigInt d, Uint8List pub}) keyFor(String c) => keys.putIfAbsent(c, () {
+          final kp = NostrCrypto.generateKeyPair();
+          var d = BigInt.zero;
+          for (final b in HEX.decode(kp.privateKeyHex)) {
+            d = (d << 8) | BigInt.from(b);
+          }
+          return (d: d, pub: Uint8List.fromList(HEX.decode(kp.publicKeyHex)));
+        });
+    g.keyResolver = (c) => keys[c]?.pub;
+    const grp = 'X5A3F2';
+    final grant = xprsSign(
+        XprsPacket.parse(
+            't:moderate f:$grp d:$grp ts:2026-08-08_10:00:00 grant:X1RD89')!,
+        keyFor(grp).d);
+    g.offer(grant);
+    g.offer(xprsSign(
+        XprsPacket.parse('t:moderate f:X1RD89 d:$grp ts:2026-08-08_11:00:00 '
+            'r:${xprsIdentifier(grant)} accept:member')!,
+        keyFor('X1RD89').d));
+    final pub = XprsPublisher.instance;
+    XprsPacket post(String from, String to) =>
+        XprsPacket.parse('t:message f:$from d:$to ts:2026-08-08_12:00:00 m:x')!;
+
+    XprsArchive.instance.selfCallsign = 'X1RD89';
+    expect(pub.mayAir(post('X1RD89', grp)), isTrue, reason: 'a member');
+    XprsArchive.instance.selfCallsign = 'X1PZ4Q';
+    expect(pub.mayAir(post('X1PZ4Q', grp)), isFalse, reason: 'a stranger');
+    expect(pub.mayAir(post('X1PZ4Q', 'X5ZZZZ')), isTrue,
+        reason: 'no record of that group: nothing to verify, fails open');
+    expect(pub.mayAir(post('X1PZ4Q', 'X1RD89')), isTrue,
+        reason: 'not a group at all');
+    XprsArchive.instance.selfCallsign = '';
+    g.clear();
+  });
 
   // No active profile in a unit test: the publisher must refuse politely.
   test('no profile -> nothing published', () async {

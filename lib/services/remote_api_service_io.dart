@@ -13,6 +13,7 @@ import 'dart:typed_data';
 import 'xprs/xprs_archive.dart';
 import 'xprs/xprs_bridge.dart';
 import 'xprs/xprs_ingest.dart';
+import 'receive/wapp_delivery.dart';
 import 'xprs/xprs_lan.dart';
 import 'xprs/xprs_publisher.dart';
 import 'mesh/xblob_service.dart';
@@ -1619,6 +1620,9 @@ class RemoteApiService {
           'ok': true,
           'count': rows.length,
           'refusedRns': XprsIngest.refusedRns,
+          // Closed-group posts from a proven non-member, stopped at the
+          // wapp door (26.7, decided in the core once for every bearer).
+          'refusedGroupAuthor': WappDelivery.refusedGroupAuthor,
           'archive': XprsArchive.instance.statusJson(),
           'rows': rows,
         });

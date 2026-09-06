@@ -88,6 +88,19 @@ void main() {
       expect(m.mayPost(g, 'X1RD89', nowMs: now), isTrue);
     });
 
+    test('a grant and its acceptance at the SAME ts still make the member', () {
+      // A self-grant on group creation signs the grant and the acceptance in
+      // the same second. 26.4: membership begins at the acceptance's ts if the
+      // grant was in force then — and a same-ts grant is in force. The replay
+      // must not drop the acceptance because the id tie-break happened to sort
+      // it before its own grant.
+      const when = '2026-08-08_10:00:00';
+      final grant = _act(g, when, 'grant:X1RD89');
+      m.offer(_accept('X1RD89', when, xprsIdentifier(grant)), nowMs: now);
+      m.offer(grant, nowMs: now); // arrival order deliberately reversed too
+      expect(m.rosterOf(g, nowMs: now).roles['X1RD89'], XprsRole.member);
+    });
+
     test('an acceptance naming the wrong grant does nothing', () {
       m.offer(_act(g, '2026-08-08_10:00:00', 'grant:X1RD89'), nowMs: now);
       m.offer(_accept('X1RD89', '2026-08-08_11:00:00', 'ffffff'), nowMs: now);

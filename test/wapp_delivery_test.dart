@@ -17,10 +17,15 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hex/hex.dart';
 import 'package:xprs/services/receive/packet_gateway.dart';
 import 'package:xprs/services/receive/wapp_delivery.dart';
 import 'package:xprs/services/xprs/xprs_archive.dart';
+import 'package:xprs/services/xprs/xprs_groups.dart';
+import 'package:xprs/services/xprs/xprs_id.dart';
 import 'package:xprs/services/xprs/xprs_packet.dart';
+import 'package:xprs/services/xprs/xprs_sig.dart';
+import 'package:xprs/util/nostr_crypto.dart';
 import 'package:xprs/wapp/wapp_event_broker.dart';
 
 void main() {
@@ -53,6 +58,62 @@ void main() {
         reason: 'absent scope: IS global — the case a wapp gets wrong');
     expect(deliver('$head scope:local m:the room')['scope'], 'local');
     expect(deliver('$head scope:PT m:this country')['scope'], 'country');
+  });
+
+  // Section 26.7 at the RECEIVE door: a closed-group post from a proven
+  // non-member is not handed to any wapp, a member's is, and a group whose
+  // roster cannot be verified fails OPEN. Decided here, once, for every
+  // bearer — no wapp has to know what a roster is.
+  test('a closed-group post is handed on only from a member (26.7, at the door)',
+      () {
+    bus.registerEngine('chat');
+    bus.subscribe('chat', rxTopicFor('message'));
+    final m = XprsGroups.instance;
+    m.clear();
+    final keys = <String, ({BigInt d, Uint8List pub})>{};
+    ({BigInt d, Uint8List pub}) keyFor(String c) => keys.putIfAbsent(c, () {
+          final kp = NostrCrypto.generateKeyPair();
+          var d = BigInt.zero;
+          for (final b in HEX.decode(kp.privateKeyHex)) {
+            d = (d << 8) | BigInt.from(b);
+          }
+          return (
+            d: d,
+            pub: Uint8List.fromList(HEX.decode(kp.publicKeyHex)),
+          );
+        });
+    m.keyResolver = (c) => keys[c]?.pub;
+    const g = 'X5A3F2';
+    final grant = xprsSign(
+        XprsPacket.parse(
+            't:moderate f:$g d:$g ts:2026-08-08_10:00:00 grant:X1RD89')!,
+        keyFor(g).d);
+    m.offer(grant);
+    m.offer(xprsSign(
+        XprsPacket.parse('t:moderate f:X1RD89 d:$g ts:2026-08-08_11:00:00 '
+            'r:${xprsIdentifier(grant)} accept:member')!,
+        keyFor('X1RD89').d));
+    keyFor('X1PZ4Q'); // a stranger: known key, no grant
+
+    int deliver(String wire) => WappDelivery.instance
+        .deliverPacket(XprsPacket.parse(wire)!, bearer: 'lan', forUs: false);
+    const ts = 'ts:2026-08-08_12:00:00';
+    expect(deliver('t:message f:X1RD89 d:$g $ts m:from a member'), 1);
+    expect(deliver('t:message f:X1PZ4Q d:$g $ts m:from a stranger'), 0,
+        reason: 'a proven non-member is stopped at the door');
+    expect(WappDelivery.refusedGroupAuthor, 1);
+    // A group we hold no record of: nothing to verify against, fails open.
+    expect(deliver('t:message f:X1PZ4Q d:X5ZZZZ $ts m:unverifiable'), 1);
+    // The same rule on the content lane.
+    expect(
+        WappDelivery.instance.deliverMessage(
+            from: 'x', call: 'X1PZ4Q', content: 'psst', title: '#$g'),
+        0);
+    expect(
+        WappDelivery.instance.deliverMessage(
+            from: 'x', call: 'X1RD89', content: 'hi', title: '#$g'),
+        1);
+    m.clear();
   });
 
   test('only a subscriber is told, and it is told once', () {

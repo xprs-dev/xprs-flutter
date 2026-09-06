@@ -11,6 +11,7 @@ import 'dart:typed_data';
 import 'dart:convert';
 
 import 'package:xprs/services/xprs/xprs_archive.dart';
+import 'package:xprs/services/xprs/xprs_groups.dart';
 import 'package:xprs/services/xprs/xprs_id.dart';
 import 'package:xprs/services/xprs/xprs_ingest.dart';
 import 'package:xprs/services/xprs/xprs_monitor.dart';
@@ -210,6 +211,28 @@ void main() {
     expect(a.hasActiveDecl('X1BOA3', nowMs: january), true);
   });
 
+  // A grant that arrives ONLY over Reticulum -- the one lane a phone on
+  // cellular has -- used to reach the archive and never the live roster, so
+  // the invitee saw no offer until a restart replayed the record. The radio
+  // lane fed every act to XprsGroups; this lane forgot. Same funnel rule.
+  test('reticulum lane: a group act moves the LIVE roster, no restart needed',
+      () {
+    final g = XprsGroups.instance;
+    g.clear();
+    g.keyResolver = (c) => c == 'X5A3F2' ? _pubOf(_d) : null;
+    Uint8List wire(String s) => Uint8List.fromList(utf8.encode(s));
+    XprsIngest.reticulum(
+        'aa11',
+        wire(xprsSign(
+                _p('t:moderate f:X5A3F2 d:X5A3F2 ts:2026-08-13_10:00:00 '
+                    'grant:X1SELF'),
+                _d)
+            .encode()));
+    expect(g.rosterOf('X5A3F2').roles['X1SELF'], XprsRole.invited,
+        reason: 'the offer is live the moment it is heard, on this lane too');
+    g.clear();
+  });
+
   test('reticulum lane: refused without a declaration, admitted with one, '
       'monitor untouched', () {
     XprsMonitor.instance.clear();
@@ -241,8 +264,17 @@ void main() {
     final types = a.query().map((r) => r['type']).toList();
     expect(types, containsAll(['mailbox', 'info', 'message']));
 
-    // Nothing on this lane is a sighting.
-    expect(XprsMonitor.instance.revision, rev);
+    // Nothing on this lane is a SIGHTING (the air's list), but since 0c57aee a
+    // station that reached us over Reticulum IS listed, apart from the air,
+    // under "On Reticulum" -- so the monitor does move, and the old "revision
+    // unchanged" assertion had been failing on main for two days. Assert the
+    // behaviour that commit chose: remote, not local.
+    expect(XprsMonitor.instance.revision, greaterThan(rev));
+    expect(XprsMonitor.instance.remote.keys, containsAll(['X1AAA', 'X1ZZZ']));
+    final sections = jsonEncode(XprsMonitor.instance.stationsJson());
+    expect(sections, contains('Heard over the air (0)'),
+        reason: 'a hub arrival is never an in-earshot sighting');
+    expect(sections, contains('On Reticulum (2)'));
   });
 
   test('reticulum lane records the bearer it actually travelled on', () {

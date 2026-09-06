@@ -3552,6 +3552,10 @@ class WappEngine {
         final wire = _readStr(ptr, len).trim();
         final p = XprsPacket.parse(wire);
         if (p == null || !p.fits) return -1;
+        // The core's answer, given at once: -2 is "not a member of that
+        // closed group" (26.7). publishWire applies the same rule for every
+        // caller; this lets the wapp say why instead of "could not send".
+        if (!XprsPublisher.instance.mayAir(p)) return -2;
         unawaited(XprsPublisher.instance.publishWire(wire));
         return 0;
       },
@@ -3794,6 +3798,50 @@ class WappEngine {
         return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
       },
       params: [ValueTy.i32, ValueTy.i32],
+      results: [ValueTy.i32],
+    );
+    // hal_xprs_group_roster(group, out, cap): ONE group's roster as a flat JSON
+    // array `[{"call","role","state"}]` — the callsigns the member panel shows,
+    // which hal_xprs_groups only counts. `state` is "member" for a full member
+    // (role member/mod/admin) or "invited" for an open offer (26.3.1: not a
+    // member until they accept). The group itself (26.1's self-admin) is never
+    // listed. A verified group whose own device holds the key shows us even if
+    // an old group never self-granted us.
+    final halXprsGroupRoster = WasmFunction(
+      (int gPtr, int gLen, int outPtr, int outCap) {
+        if (outCap <= 0) return 0;
+        final g = _readStr(gPtr, gLen).trim().replaceFirst('#', '').toUpperCase();
+        if (g.isEmpty) return 0;
+        final me = MeshService.instance.tableCallsign.trim().toUpperCase();
+        final haveKey = XprsGroups.instance.keyResolver?.call(g) != null;
+        final r = XprsGroups.instance.rosterOf(g, haveKey: haveKey);
+        final out = <Map<String, String>>[];
+        for (final e in r.roles.entries) {
+          if (e.key == g) continue; // the group is its own admin (26.1)
+          if (e.value == XprsRole.member ||
+              e.value == XprsRole.mod ||
+              e.value == XprsRole.admin) {
+            out.add({'call': e.key, 'role': e.value.name, 'state': 'member'});
+          }
+        }
+        // The key-holder belongs even when an old group never recorded it.
+        // One indexed row (`npubFor`), not `mine()` — that is a full SELECT
+        // plus a list build to answer a yes/no about ONE group, and this runs
+        // on every roster change while the room is open (performance.md 8.7).
+        final weHoldKey = XprsGroupKeys.instance.npubFor(g) != null;
+        if (weHoldKey && me.isNotEmpty && !out.any((m) => m['call'] == me)) {
+          out.insert(0, {'call': me, 'role': 'admin', 'state': 'member'});
+        }
+        for (final k in r.offers.keys) {
+          if (!out.any((m) => m['call'] == k)) {
+            out.add({'call': k, 'role': 'invited', 'state': 'invited'});
+          }
+        }
+        final bytes = utf8.encode(jsonEncode(out));
+        if (bytes.length > outCap) return -bytes.length;
+        return _writeBytes(outPtr, outCap, Uint8List.fromList(bytes));
+      },
+      params: [ValueTy.i32, ValueTy.i32, ValueTy.i32, ValueTy.i32],
       results: [ValueTy.i32],
     );
     // hal_xprs_set_pref("key=value"): archive / archiveMaxMb / archiveMaxDays
@@ -4151,6 +4199,7 @@ class WappEngine {
       WasmImport('hal', 'xprs_status', halXprsStatus),
       WasmImport('hal', 'xprs_history', halXprsHistory),
       WasmImport('hal', 'xprs_groups', halXprsGroups),
+      WasmImport('hal', 'xprs_group_roster', halXprsGroupRoster),
       WasmImport('hal', 'xprs_send', halXprsSend),
       WasmImport('hal', 'xprs_read', halXprsRead),
       WasmImport('hal', 'xprs_message', halXprsMessage),

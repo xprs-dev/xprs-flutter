@@ -185,9 +185,11 @@ class _ReticulumBearer implements XprsBearer {
     // the paragraph above, so broadcasting would cost groups the one Reticulum
     // lane that actually works between networks.
     final bytes = Uint8List.fromList(utf8.encode(wire));
-    final dest = XprsPacket.parse(wire)?['d']?.trim().toUpperCase() ?? '';
+    final p = XprsPacket.parse(wire);
+    final dest = p?['d']?.trim().toUpperCase() ?? '';
     if (dest.isNotEmpty && !xprsAddressesStation(dest)) {
-      return await _sendToMembers(dest, bytes);
+      return await _sendToMembers(dest, bytes,
+          named: XprsPublisher.namedInAct(p));
     }
     if (dest.isNotEmpty) {
       final hex = RnsService.instance.lxmfDestForCallsign(dest);
@@ -219,28 +221,82 @@ class _ReticulumBearer implements XprsBearer {
   }
 
   /// One addressed datagram per member of [group] (26.8: a group's traffic
-  /// travels by its members holding it, not by a directory).
+  /// travels by its members holding it, not by a directory) — and per person
+  /// the act NAMES ([named]).
   ///
-  /// Only people who actually belong: an `invited` callsign has been asked and
-  /// has not answered (26.3.1), the group's own callsign is the admin in the
-  /// roster and has no mailbox, and we do not post to ourselves.
+  /// A post goes to the people who actually belong: an `invited` callsign has
+  /// been asked and has not answered (26.3.1), the group's own callsign is the
+  /// admin in the roster and has no mailbox, and we do not post to ourselves.
+  ///
+  /// An ACT is different, and this used to get it wrong: a grant fanned out to
+  /// the existing members only, so the one station that needed it — the person
+  /// being invited, whose role is `invited` and therefore skipped above — never
+  /// received their offer unless they happened to overhear the radio copy. On a
+  /// shared LAN that looked like it worked; a phone on cellular could never be
+  /// invited at all. 26.7: "Grants have to reach strangers for anyone to
+  /// bootstrap." So the callsigns a `grant:`/`revoke:` names are addressed too.
   ///
   /// `refused` when nobody resolves, rather than a quiet success. The publish
   /// line then reads `reticulum:refused` and the radios still carry the post —
   /// a visible answer instead of a packet that went nowhere in silence.
-  Future<XprsSendResult> _sendToMembers(String group, Uint8List bytes) async {
+  Future<XprsSendResult> _sendToMembers(String group, Uint8List bytes,
+      {List<String> named = const []}) async {
     final me = XprsArchive.instance.selfCallsign.trim().toUpperCase();
     final roster = XprsGroups.instance.rosterOf(group);
-    final sends = <Future<bool>>[];
+    final targets = <String>{};
     for (final e in roster.roles.entries) {
-      if (e.key == group || e.key == me) continue;
-      if (e.value != XprsRole.member &&
-          e.value != XprsRole.mod &&
-          e.value != XprsRole.admin) {
-        continue;
+      if (e.value == XprsRole.member ||
+          e.value == XprsRole.mod ||
+          e.value == XprsRole.admin) {
+        targets.add(e.key);
       }
-      final hex = RnsService.instance.lxmfDestForCallsign(e.key);
+    }
+    targets.addAll(named);
+    targets.remove(group);
+    targets.remove(me);
+    // The people an act NAMES may never have heard the group announce itself:
+    // a `t:identity` is undirected, so over Reticulum it is an announce, and
+    // the hubs drop those between their own clients (see [send]). Without the
+    // group's key the invitee cannot verify the grant and 26.8 says they must
+    // not take anybody's word for it -- so the key travels WITH the act, as
+    // one more addressed datagram. Members already hold it; the named ones
+    // may not.
+    //
+    // And not only the key: the RECORD. A newcomer's roster holds the group
+    // and themselves and nobody else, so their own acceptance -- and every
+    // post after it -- has no member to be addressed to and never leaves a
+    // phone on cellular. 26.8 is the bootstrap: "any member may rebroadcast
+    // the grants it holds ... a newcomer verifies them against the group's
+    // key and needs to trust the rebroadcaster not at all". So the identity
+    // and the acts this station holds for the group travel with the offer.
+    // Bounded: a roster is a few dozen acts, not a feed.
+    final bundle = <Uint8List>[];
+    if (named.isNotEmpty) {
+      // The acts a fresh group just aired are still in the archive's pending
+      // queue (it flushes every 20 s); a grant sent seconds after `create`
+      // found nothing to bundle. Flush first -- a handful of rows, on an act a
+      // person just tapped, not on any poll.
+      XprsArchive.instance.flush();
+      for (final r in XprsArchive.instance
+          .query(types: const ['identity'], only: group, limit: 1)) {
+        final w = r['wire'];
+        if (w is String && w.isNotEmpty) bundle.add(Uint8List.fromList(utf8.encode(w)));
+      }
+      for (final r in XprsArchive.instance
+          .query(types: const ['moderate'], only: group, limit: 64)) {
+        final w = r['wire'];
+        if (w is String && w.isNotEmpty) bundle.add(Uint8List.fromList(utf8.encode(w)));
+      }
+    }
+    final sends = <Future<bool>>[];
+    for (final call in targets) {
+      final hex = RnsService.instance.lxmfDestForCallsign(call);
       if (hex.isEmpty) continue; // never observed; the radios still carry it
+      if (named.contains(call)) {
+        for (final b in bundle) {
+          sends.add(RnsService.instance.wappSendTo('xprs', hex, b));
+        }
+      }
       sends.add(RnsService.instance.wappSendTo('xprs', hex, bytes));
     }
     if (sends.isEmpty) return XprsSendResult.refused;
@@ -301,6 +357,39 @@ class _Air {
 class XprsPublisher {
   XprsPublisher._();
   static final XprsPublisher instance = XprsPublisher._();
+
+  /// Posts to a closed group this station is proven NOT to belong to, refused
+  /// before any bearer saw them.
+  static int refusedNotMember = 0;
+
+  /// May THIS station air [p]? False only for a `t:message` to a closed group
+  /// (`X5…`, 26.1) whose verified roster does not list us as member, mod or
+  /// admin. Fails OPEN like [XprsGroups.mayPost]: a roster we cannot verify
+  /// refuses nothing. Everything else is true. Read-only, synchronous, so the
+  /// HAL can answer a wapp at once with the same rule [publishWire] enforces.
+  bool mayAir(XprsPacket p) {
+    if (p.type != 'message') return true;
+    final g = (p['d'] ?? '').trim().toUpperCase();
+    if (!g.startsWith('X5')) return true;
+    final me = XprsArchive.instance.selfCallsign.trim().toUpperCase();
+    if (me.isEmpty) return true;
+    return XprsGroups.instance.mayPost(g, me,
+        haveKey: XprsGroups.instance.keyResolver?.call(g) != null);
+  }
+
+  /// The people a `t:moderate` act NAMES: its `grant:` and `revoke:` lists.
+  /// Empty for anything else. The Reticulum bearer addresses these on top of
+  /// the members, because an invitee is not a member yet and would otherwise
+  /// never receive their own offer (26.3.1, 26.7).
+  @visibleForTesting
+  static List<String> namedInAct(XprsPacket? p) {
+    if (p == null || p.type != 'moderate') return const [];
+    return [
+      for (final f in const ['grant', 'revoke'])
+        for (final c in (p[f] ?? '').split(','))
+          if (c.trim().isNotEmpty) c.trim().toUpperCase(),
+    ];
+  }
 
   /// Replaceable for tests; order is presentation only (every active bearer
   /// is used).
@@ -757,6 +846,18 @@ class XprsPublisher {
     var p = XprsPacket.parse(wireIn.trim());
     if (p == null) {
       LogService.instance.add('XPRS: publishWire rejected (parse)');
+      return const {};
+    }
+    // WHO MAY POST IN A CLOSED GROUP IS DECIDED HERE, ONCE. 26.7 says
+    // membership decides display; the sending side of that is this station
+    // not airing a post to a group it does not belong to. It used to be the
+    // chat wapp's check, which meant every other caller -- the HTTP API, any
+    // other wapp -- aired freely. One door, every caller, and the wapp only
+    // shows the answer.
+    if (!mayAir(p)) {
+      refusedNotMember++;
+      LogService.instance.add(
+          'XPRS: publishWire refused (not a member of ${p['d']})');
       return const {};
     }
     // TOO LONG IS NOT THE SAME AS MALFORMED. §6.6 is the format's own answer

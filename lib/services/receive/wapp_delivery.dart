@@ -35,6 +35,7 @@ import '../log_service.dart';
 import '../xprs/xprs_id.dart';
 import '../../util/nostr_crypto.dart';
 import '../xprs/xprs_archive.dart';
+import '../xprs/xprs_groups.dart';
 import '../xprs/xprs_packet.dart';
 import '../xprs/xprs_parts.dart';
 import '../xprs/xprs_sig.dart';
@@ -128,6 +129,26 @@ class WappDelivery {
   }
 
 
+  /// Closed-group posts from a proven non-member, stopped at this door.
+  static int refusedGroupAuthor = 0;
+
+  /// Section 26.7 at the RECEIVE point: "membership decides what a client
+  /// shows", and this is the one door every wapp is shown anything through —
+  /// so it is decided once, here, for every bearer, and no wapp has to know
+  /// what a roster is. A message to a closed group (`X5…`, 26.1) whose author
+  /// is not on the verified roster is not handed on. Fails OPEN like
+  /// [XprsGroups.mayPost]: an unverifiable roster hides nothing. Safety types
+  /// (`sos`/`warning`/`info`) never come through this test — it only ever sees
+  /// `t:message`.
+  static bool groupAuthorMayPost(String dest, String author) {
+    final g = dest.trim().toUpperCase();
+    if (!g.startsWith('X5')) return true;
+    final a = author.trim().toUpperCase();
+    if (a.isEmpty) return true;
+    return XprsGroups.instance.mayPost(g, a,
+        haveKey: XprsGroups.instance.keyResolver?.call(g) != null);
+  }
+
   /// Publish a heard packet to whoever subscribed to its type.
   ///
   /// [bearer] is the word a radio person would use (`ble`, `lan`, `rns`);
@@ -144,6 +165,12 @@ class WappDelivery {
     // that is still short publishes nothing.
     final p = _whole(pIn, bearer: bearer, rssi: rssi);
     if (p == null) return 0;
+    if (p.type == 'message' &&
+        !groupAuthorMayPost(
+            p['d'] ?? '', NostrCrypto.bareCallsign(p['f'] ?? ''))) {
+      refusedGroupAuthor++;
+      return 0;
+    }
     // §9.1's verdict, computed here rather than left to the wapp. The archive
     // has always computed exactly this for its own rows; a wapp handed a packet
     // and no verdict has to verify it itself, and chat did — with a signature
@@ -216,6 +243,11 @@ class WappDelivery {
       refusedProtocol++;
       return 0;
     }
+    if (title.startsWith('#') &&
+        !groupAuthorMayPost(title.substring(1), call)) {
+      refusedGroupAuthor++;
+      return 0;
+    }
     return _publish(rxTopicFor('message'), {
         'id': id,
         'type': 'message',
@@ -269,6 +301,7 @@ class WappDelivery {
 
   static void debugReset() {
     refusedProtocol = 0;
+    refusedGroupAuthor = 0;
     published = 0;
     noSubscriber = 0;
     partsHeld = 0;

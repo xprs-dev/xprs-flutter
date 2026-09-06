@@ -1045,6 +1045,77 @@ number: BLE message 10-of-10 both directions screen-off in the `battery` tier,
 LAN reachability while asleep, hub round trip ≤ 5 s. Baseline to beat: 8% of
 one core screen-off, 0 main-isolate stalls, ~250-300 MB RES.
 
+### 8.12 A day on closed groups: five lessons that generalise (2026-09-06)
+
+Making "C61 invites a phone on cellular into a closed group" work took a full
+day and touched nothing that looked like the bug. What it cost, so it is not
+paid again.
+
+**Measure at the right point, or the fix lands in the wrong layer.** The first
+symptom was "Hotwav never receives its invitation". I spent an hour inside
+announce handling, LXMF-dest learning and the transport's fast-path pin — all
+real, none of it the cause. The cause was one `continue` in
+`_sendToMembers`: a group act fanned out to *existing members only*, and an
+invitee is `invited`, so the one station the packet was for was never a
+target. On a shared LAN this was invisible (the broadcast copy arrived by
+accident); on cellular it was total. The lesson is the one §4 already states
+for CPU: **read the send verdict of the packet in question, not the state of
+the network around it.** `moderate wire — …reticulum:refused` right after
+`create()` is the self-grant/accept (no target but me); the line for the
+grant you sent comes later. I took the last line and chased a ghost.
+
+**A door that is checked in a wapp is a door that is not checked.** The chat
+wapp gated "may I post here" on the roster the core reported. Every other
+caller — the HTTP API, any other wapp — aired freely, which is how a
+non-member's post reached a member's archive during the test. Membership is
+now decided once, in the core, at both doors: `WappDelivery` refuses a
+non-member's group post before any wapp sees it, `XprsPublisher.mayAir`
+refuses to air one, and `hal_xprs_send` returns `-2` so the wapp can *say* it.
+The wapp's own check and the HAL it needed are gone. Same rule as
+docs/architecture.md rule 1, and the same reason: a decision that exists in
+one wapp exists nowhere.
+
+**Three things the store does behind your back, each a false negative.**
+- The archive keeps rows in a pending queue and flushes every **20 s**.
+  `/api/xprs/history` is a SQL read, so a message that arrived 10 s ago is
+  "not there". Two "delivery failures" in this work were this. A grant sent
+  seconds after `create()` also found nothing to bundle for the same reason;
+  `flush()` is public and cheap on an act somebody just tapped.
+- The internet lane archived a `t:moderate` and never fed it to the live
+  roster (`XprsGroups.offer` was called on the radio lane only). The roster
+  moved *after a restart*, from the archive replay — the restart-fixes-it
+  fingerprint §6.2.1 already warned about. Both lanes now call the same
+  funnel.
+- The §26.4 tie-break ("same `ts`, smaller id stands") sorted a self-grant
+  and its own acceptance at random, dropping the acceptance about half the
+  time. A rule written for contradicting acts by one signer was being applied
+  to a causally-ordered pair by two. It failed silently and only sometimes —
+  the worst kind.
+
+**Cache the read of the thing that does not change.** `hal_xprs_group_roster`
+called `XprsGroupKeys.mine()` — a full `SELECT` and a list build — to answer
+"do we hold *this* group's key", on every roster change while a room was open.
+§8.7's shape exactly; now one indexed row. It reads as free at the call site,
+which is why the guard, not review, has to catch these.
+
+**The tools lied, and each lie cost more than the bug.**
+- `grep` here is `ugrep`, and it silently returns *nothing* for
+  `rns_service.dart` (11k lines, valid UTF-8 — it classifies it as binary).
+  Definitions "did not exist", call sites did. `grep -a`. An hour.
+- `pgrep -f`/`pkill -f bundle/xprs` match the shell issuing them. "Desktop
+  running" was my own command line; the desktop was down. `pidof xprs`.
+- The log ring on a busy node scrolls in seconds; a verdict captured a minute
+  later is a different packet's. Dump `n=60` *immediately* after the act.
+- `xprs_archive_test` "monitor untouched" had been failing on `main` for two
+  days (0c57aee made the internet lane a listed sighting on purpose). A red
+  suite you did not cause still has to be understood before you trust green.
+
+> **Rule: when a packet does not arrive, the first question is "what did the
+> sender's publisher say about *that* packet", the second is "did the receiver's
+> funnel call the same hooks it calls on the radio lane", and only then the
+> network.** Every hour spent in the transport this day was spent before
+> asking those two.
+
 ## Profiling native memory on a stock device (recipe)
 
 The Dart VM service and Android's native heap profiler both work on a **profile

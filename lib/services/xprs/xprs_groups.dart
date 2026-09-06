@@ -369,7 +369,21 @@ class XprsGroups {
       if (from != null && a.ts >= from) continue;
       live.add(a);
     }
-    live.sort((x, y) => x.ts != y.ts ? x.ts - y.ts : x.id.compareTo(y.id));
+    live.sort((x, y) {
+      if (x.ts != y.ts) return x.ts - y.ts;
+      // A grant and its OWN acceptance can share a ts (both signed in the same
+      // second — a self-grant on group creation does exactly this). 26.4 says
+      // membership begins at the acceptance's ts "if the grant was in force at
+      // that moment", and a same-ts grant IS in force, so the grant must be
+      // walked first or the acceptance finds no offer and is dropped. The
+      // acceptance names the grant by id in r: (`hideRef`), so this ordering is
+      // reproducible everywhere — unlike the plain id tie-break, which broke
+      // this pair at random depending on which id sorted smaller. The id rule
+      // still decides every other tie (contradicting acts by one signer).
+      if (y.accept.isNotEmpty && y.hideRef == x.id) return -1;
+      if (x.accept.isNotEmpty && x.hideRef == y.id) return 1;
+      return x.id.compareTo(y.id);
+    });
 
     // PASS C -- walk in order. Authority is judged AT THE MOMENT OF THE ACT,
     // so the roles accumulated so far are exactly the right ones to test

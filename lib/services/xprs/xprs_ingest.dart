@@ -602,6 +602,16 @@ class XprsIngest {
     // two strangers meeting on the internet could not bootstrap at all.
     if (p.type == 'identity') _bindIdentity(fromC, p);
 
+    // A GROUP ACT OFF THE INTERNET LANE. The radio lane feeds every
+    // `t:moderate` to the roster ("it goes HERE, in the funnel, the one place
+    // every bearer reaches"); this lane archived it and never did, so a grant
+    // that arrived ONLY over Reticulum -- the only lane a phone on cellular
+    // has -- left the live roster untouched and the invitee was never offered
+    // anything until a restart replayed the archive. Same call, same place:
+    // `offer` verifies the signature itself (26.8: a newcomer trusts the
+    // carrier for nothing), so it needs no declaration from anyone.
+    if (p.type == 'moderate') XprsGroups.instance.offer(p);
+
     // A RECEIPT OFF THE INTERNET LANE. This branch did not exist, so a
     // `t:receipt` arriving over Reticulum released nothing and was not even
     // counted -- and Reticulum is exactly the lane a receipt takes for a

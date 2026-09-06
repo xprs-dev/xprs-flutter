@@ -20,6 +20,7 @@ import 'xprs_archive.dart';
 import 'xprs_group_act.dart';
 import 'xprs_group_keys.dart';
 import 'xprs_groups.dart';
+import 'xprs_id.dart';
 import 'xprs_packet.dart';
 import 'xprs_publisher.dart';
 import 'xprs_sig.dart';
@@ -63,6 +64,25 @@ class XprsGroupOps {
       // verbatim: signed by the GROUP, and publishWire signs only for our own
       // callsign.
       if (ann != null) unawaited(_air(ann));
+    }
+    // 26.7: membership decides what a co-member's client SHOWS, and it shows
+    // only the roster. But 26.1 makes the group its own admin — the person who
+    // holds the key is never named in `roles` — so an admin who never joins
+    // their own group is a stranger to every other member's display, and their
+    // posts get filtered out on the far side. The roster is meant to publish
+    // "everyone who belongs, including members who never speak" (26.7), so the
+    // admin records themselves as one: a self-grant, then the self-acceptance
+    // 26.3.1 requires (a grant confers nothing until the person signs for it).
+    // Both go through the same grant/accept doors a person taps, and both are
+    // one-time acts at creation.
+    final me = XprsArchive.instance.selfCallsign.trim().toUpperCase();
+    if (me.isNotEmpty) {
+      final gr = grant(g.callsign, [me], role: 'member');
+      final wire = gr.wire;
+      if (gr.ok && wire != null) {
+        final gid = xprsIdentifierOf(wire);
+        if (gid != null) accept(g.callsign, me, gid, role: 'member');
+      }
     }
     return (callsign: g.callsign, npub: g.npub, nick: g.nick);
   }
