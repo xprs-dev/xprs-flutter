@@ -934,13 +934,18 @@ class XprsPublisher {
   /// ranking exists to stop.
   static const List<String> _byBandwidth = ['lan', 'ble5', 'reticulum'];
 
-  /// How recent a sighting has to be to count as evidence of a working path.
-  /// Three beacon periods, the same window `RnsService._peerReachable` uses, so
+  /// How recent a declared `link:` has to be to count. Three beacon periods, so
   /// one missed beacon does not demote a peer that is simply having a bad
-  /// minute.
+  /// minute. Reticulum's evidence is not aged here -- it is a live route held by
+  /// the transport (`RnsService.reachableByCallsign`), fresh by construction.
   static const int _evidenceMs = 3 * 60 * 1000;
 
   /// The single bearer to use for [p], or null to fan out.
+  ///
+  /// Section 36.0 pins ONE bearer only on "recent evidence [it is] working" and
+  /// otherwise "answers on every bearer it can". The evidence is not all the
+  /// same strength, and this is the whole of the fix: a bearer whose route we
+  /// have PROVEN is never suppressed by one a peer merely CLAIMS.
   String? _preferredBearer(XprsPacket p, String dest) {
     // Only a DIRECTED packet has one station to choose a path to. A broadcast
     // has no "same station" to rank paths for, and section 36.0's rule does not
@@ -954,20 +959,82 @@ class XprsPublisher {
     // (26.1), so a group was ranked as though it were one station and could
     // collapse to a single bearer.
     if (!xprsAddressesStation(dest)) return null;
+
+    // PROVEN, local: a live GATT link or an accepted custody session reaches
+    // THIS station right now -- not a claim in a beacon. It is the fastest
+    // short-range lane and it is proven, so it wins outright. Section 36.0 at
+    // its strongest: "a slower one that answered a minute ago is knowledge".
+    if (_bleSessionProven(dest)) return 'ble5';
+
+    // PROVEN, internet: a live Reticulum route is the ONLY per-peer evidence
+    // the internet lane has. Reticulum carries no `link:` word (section 10.6.1
+    // lists radios a station stands on; the internet is not one), so a peer
+    // never declares itself "on reticulum" and this is the transport's own
+    // path table speaking, not a claim.
+    final netProven = RnsService.instance.reachableByCallsign(dest);
+
+    // CLAIMED, local: the peer's own `link:` (section 10.6.1), ble/lan/lora.
+    // The best evidence a local mesh ever has -- but a claim, not proof. Without
+    // `via:` (section 37, unimplemented) a beacon heard RELAYED over the
+    // internet is byte-identical to one heard on the air, so a phone on a
+    // different network still advertises `link:ble` straight into our ear.
     final st = XprsMonitor.instance.stations[dest];
-    if (st == null) return null;
-    // What the station SAYS it is on (its beacon's `link:`, section 10.6.1) --
-    // not the bearer its packets happened to arrive over, which is a statement
-    // about whoever re-aired them. See `XprsStation.bearersDeclared`.
-    final fresh = st
-        .declaredBearersFresh(DateTime.now().millisecondsSinceEpoch, _evidenceMs)
-        .toSet();
-    if (fresh.isEmpty) return null;
+    final declared = st == null
+        ? const <String>{}
+        : st
+            .declaredBearersFresh(
+                DateTime.now().millisecondsSinceEpoch, _evidenceMs)
+            .toSet();
+
+    // The decision itself is pure, and lives in [choosePreferredBearer] so it
+    // can be tested without the RNS transport, the GATT peer and the monitor.
+    // Everything above is just gathering the three signals it weighs.
+    return choosePreferredBearer(
+      bleSessionProven: false, // already returned 'ble5' above when proven
+      netProven: netProven,
+      declaredLocal: declared,
+    );
+  }
+
+  /// The section 36.0 path decision, pure. Given the evidence for one station:
+  ///
+  ///   [bleSessionProven]  a live GATT link or custody session reaches it now
+  ///   [netProven]         the transport holds a live Reticulum route to it
+  ///   [declaredLocal]     the local `link:` bearers it has freshly CLAIMED
+  ///                       (publisher names: `lan`/`ble5`/`lora`)
+  ///
+  /// Returns the single bearer to pin, or null to fan out. The one rule that
+  /// matters: a lane whose route is PROVEN is never suppressed by one that is
+  /// merely CLAIMED. A proven local session wins outright (fastest and proven);
+  /// otherwise a local claim standing beside a proven internet route is the
+  /// "guess vs knowledge" case (section 36.0) and we fan out so BOTH get a copy
+  /// -- deduplicated on the section 5 identifier -- rather than pinning the
+  /// guess and stranding the receipt on a radio the peer cannot hear. With no
+  /// internet route to confuse it, the declared link is the best a local mesh
+  /// has and is used, ranked by bandwidth.
+  @visibleForTesting
+  static String? choosePreferredBearer({
+    required bool bleSessionProven,
+    required bool netProven,
+    required Set<String> declaredLocal,
+  }) {
+    if (bleSessionProven) return 'ble5';
+    if (declaredLocal.isNotEmpty && netProven) return null;
     for (final want in _byBandwidth) {
-      if (fresh.contains(want)) return want;
+      if (declaredLocal.contains(want)) return want;
     }
-    // Heard, but on nothing we rank -- say nothing and let every bearer try.
+    if (netProven) return 'reticulum';
     return null;
+  }
+
+  /// A LOCAL path we have PROVEN reaches [dest] this moment: a live GATT link,
+  /// or a custody session that will take its mail. Pure -- it only ASKS the
+  /// session layer whether it could take custody; handing wires over is
+  /// `_sessionTakes`'s job, not this predicate's.
+  bool _bleSessionProven(String dest) {
+    if (dest.isNotEmpty && GattPeer.callsign == dest) return true;
+    final ask = MeshSessionManager.instance.hooks.canTakeCustody;
+    return ask != null && ask(dest);
   }
 
   /// Ask [call] for its key binding, section 18.1: "`q:identity` (section 7)

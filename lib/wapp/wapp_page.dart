@@ -4137,7 +4137,10 @@ class _WappPageState extends State<WappPage>
   /// a message leaves now or waits.
   bool _peerReachable(String id) {
     if (id.isEmpty || id.startsWith('#')) return false;
-    return XprsMonitor.instance.heardRecently(id);
+    // Green when heard on the air OR reachable over the internet -- a peer on
+    // the far side of the hubs is not an air sighting but is still reachable.
+    return XprsMonitor.instance.heardRecently(id) ||
+        RnsService.instance.reachableByCallsign(id);
   }
 
   @override

@@ -116,7 +116,8 @@ class TaskMonitorService {
       if (rns.isUp) {
         LogService.instance.add(
           'perf: rns-transport announces/s=${rns.announceRatePerSec.toStringAsFixed(1)} '
-          'paths=${rns.pathCount} passive=${rns.passive}',
+          'paths=${rns.pathCount} passive=${rns.passive} '
+          'verifyShed=${rns.verifyBudgetShed} priVerifyShed=${rns.priVerifyBudgetShed}',
         );
       }
     } catch (_) {/* telemetry must never break the app */}

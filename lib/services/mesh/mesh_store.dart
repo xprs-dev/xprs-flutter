@@ -130,6 +130,23 @@ class MeshStore {
           ts INTEGER NOT NULL,
           PRIMARY KEY (sha, target)
         )''');
+      // The core's persistent OUTGOING-packet queue. A directed LXMF send that
+      // did not confirm on the first try — a 1:1 message, and crucially a
+      // delivered/read RECEIPT — is written here so it survives a restart and
+      // is retried (RnsService's ladder) until the target confirms delivery.
+      // Distinct from `mesh_store` above, which holds OTHER people's mail we
+      // carry; this holds OUR OWN packets awaiting their answer. Keyed by a
+      // content hash of the packed bytes so one logical send is one row.
+      db.execute('''
+        CREATE TABLE IF NOT EXISTS tx_outbound(
+          key TEXT PRIMARY KEY,
+          dest TEXT NOT NULL,
+          packed BLOB NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          content TEXT NOT NULL DEFAULT '',
+          tries INTEGER NOT NULL DEFAULT 0,
+          at INTEGER NOT NULL
+        )''');
       // v2: drop the pre-park-gate backlog of undeliverable street mail
       // (it drove nonstop phone-to-phone dial loops).
       final v = db.select('PRAGMA user_version').first.columnAt(0) as int;
@@ -206,6 +223,62 @@ class MeshStore {
       ],
     );
     return true;
+  }
+
+  // ── The outgoing-packet queue (tx_outbound) ─────────────────────────────
+  //
+  // The persistent half of RnsService's LXMF retry ladder: the in-memory list
+  // is the working set, these rows are its durable backing so a restart does
+  // not lose an undelivered receipt. All writes are single-row; the pump reads
+  // the whole table once, at startup.
+
+  /// Persist (or refresh) one queued outgoing packet.
+  void txPut(String key, String dest, Uint8List packed, String title,
+      String content, int tries, int at) {
+    final db = _db;
+    if (db == null || key.isEmpty) return;
+    db.execute(
+      'INSERT OR REPLACE INTO tx_outbound(key,dest,packed,title,content,tries,at) '
+      'VALUES(?,?,?,?,?,?,?)',
+      [key, dest, packed, title, content, tries, at],
+    );
+  }
+
+  /// Advance a queued packet's ladder position (its try count and next-due).
+  void txAdvance(String key, int tries, int at) {
+    final db = _db;
+    if (db == null || key.isEmpty) return;
+    db.execute(
+        'UPDATE tx_outbound SET tries=?, at=? WHERE key=?', [tries, at, key]);
+  }
+
+  /// Drop a queued packet — delivered, given up, or unparseable.
+  void txDrop(String key) {
+    final db = _db;
+    if (db == null || key.isEmpty) return;
+    db.execute('DELETE FROM tx_outbound WHERE key=?', [key]);
+  }
+
+  /// Load the whole queue at startup, as the working-set entry maps
+  /// RnsService keeps (its field is `try`, singular, to match the in-memory
+  /// list it rebuilds).
+  List<Map<String, Object?>> txLoad() {
+    final db = _db;
+    if (db == null) return const [];
+    final rows = db.select(
+        'SELECT key,dest,packed,title,content,tries,at FROM tx_outbound');
+    return [
+      for (final r in rows)
+        <String, Object?>{
+          'key': r.columnAt(0) as String,
+          'dest': r.columnAt(1) as String,
+          'packed': r.columnAt(2) as Uint8List,
+          'title': r.columnAt(3) as String,
+          'content': r.columnAt(4) as String,
+          'try': r.columnAt(5) as int,
+          'at': r.columnAt(6) as int,
+        }
+    ];
   }
 
   /// Whether any row — in transit or archived — holds [key]. The custody

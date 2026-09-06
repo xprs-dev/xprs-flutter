@@ -40,6 +40,7 @@ class _FakeBearer implements XprsBearer {
 void main() {
   _identityAndSlots();
   _oversizeWires();
+  _pathChoice();
   TestWidgetsFlutterBinding.ensureInitialized();
 
   // No active profile in a unit test: the publisher must refuse politely.
@@ -208,5 +209,66 @@ void _oversizeWires() {
       bodies.add(p['m'] ?? '');
     }
     expect(bodies.join(' '), words, reason: 'rejoins to the original body');
+  });
+}
+
+
+// Section 36.0's path choice, isolated from the radios: a lane whose route is
+// PROVEN is never suppressed by one a peer only CLAIMS. These drive the pure
+// decision directly, so no transport, GATT peer or monitor is needed.
+void _pathChoice() {
+  group('choosePreferredBearer (§36.0: proven beats claimed)', () {
+    String? pick({
+      bool session = false,
+      bool net = false,
+      Set<String> declared = const {},
+    }) =>
+        XprsPublisher.choosePreferredBearer(
+            bleSessionProven: session, netProven: net, declaredLocal: declared);
+
+    test('a live BLE session wins outright — fastest AND proven', () {
+      // Same-desk phones: prove the short-range lane and it beats everything,
+      // including a live internet route (no 18 hops to the same desk).
+      expect(pick(session: true, net: true, declared: {'ble5'}), 'ble5');
+      expect(pick(session: true), 'ble5');
+    });
+
+    test('a claimed local link does NOT suppress a proven internet route', () {
+      // THE BUG: a phone on another network still advertises `link:ble` into
+      // our ear (relayed, indistinguishable without via:). With a live rns
+      // route and no session to prove the ble claim, fan out so reticulum — the
+      // one path we can prove — gets its copy. This is the receipt case.
+      expect(pick(net: true, declared: {'ble5'}), isNull);
+      expect(pick(net: true, declared: {'lan'}), isNull);
+      expect(pick(net: true, declared: {'lan', 'ble5'}), isNull);
+    });
+
+    test('a local mesh with no internet route uses the declared link', () {
+      // An ESP32 or radio-only peer: the beacon `link:` is the best evidence
+      // there is, ranked by bandwidth. Nothing to be suppressed by here.
+      expect(pick(declared: {'ble5'}), 'ble5');
+      expect(pick(declared: {'lan', 'ble5'}), 'lan');
+      // lora is deliberately absent from the bandwidth ranking (its bearer
+      // refuses sends until a radio ships), so a lora-only claim fans out — the
+      // same as before this change.
+      expect(pick(declared: {'lora'}), isNull);
+    });
+
+    test('a proven route and nothing local takes the internet lane', () {
+      // A peer only the hubs can reach: pin reticulum rather than fan a
+      // directed packet onto every radio.
+      expect(pick(net: true), 'reticulum');
+    });
+
+    test('no evidence at all fans out', () {
+      expect(pick(), isNull);
+    });
+
+    test('a declared bearer we do not rank is not chosen', () {
+      // declaredLocal only ever carries lan/ble5/lora; anything else means the
+      // caller mislabelled a lane, and pinning an unknown name would silence
+      // the fan-out. Fall through instead.
+      expect(pick(declared: {'espnow'}), isNull);
+    });
   });
 }

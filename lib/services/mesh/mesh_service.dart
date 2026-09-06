@@ -175,6 +175,14 @@ class MeshService {
       return;
     }
     _table = MeshTable(cs);
+    // The Reticulum receive lane tests "addressed to us" against
+    // XprsArchive.selfCallsign (xprs_ingest.dart reticulum()). Set it HERE, the
+    // instant the callsign is known — NOT only in the prefs/try block below.
+    // Otherwise a 1:1 arriving over Reticulum during init (or when prefs is
+    // null, or if MeshStore.init throws before the cascade) sees an empty self,
+    // is misrouted as a third-party carry, and is refused with
+    // "rns refused (no declaration)". The cascade below re-sets the same value.
+    XprsArchive.instance.selfCallsign = cs;
     _canAdvertise = canAdvertise;
     _running = true;
 
@@ -282,7 +290,8 @@ class MeshService {
           // verified receipt purged a store row and stopped, so the tick a
           // person sees was asserted by the wapp rather than reported by the
           // core (docs/message-receive.md section 10).
-          XprsOutbox.instance.noteReceipt(id, state: r.state);
+          XprsOutbox.instance.noteReceipt(id,
+              state: r.state, peer: (p['f'] ?? '').trim().toUpperCase());
         };
         // A reachability test answers on the lane it arrived on (§36.0: the
         // packet that just came over it is the freshest evidence of a working

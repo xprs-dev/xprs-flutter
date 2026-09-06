@@ -62,6 +62,27 @@ class XprsArchive {
   Database? _db;
   bool get ready => _db != null;
 
+  /// The stored packet whose §5 identifier is [id], or null when the spool
+  /// holds none. This is how the core answers a read receipt for a message too
+  /// old to be in [XprsReceipt]'s live pocket: the packet is resolved from the
+  /// core's own persistent spool -- the sender and addressing composeRead needs
+  /// -- rather than a wapp handing those fields across the door. Cheap: `id` is
+  /// the packets table's primary key.
+  XprsPacket? packetById(String id) {
+    final key = id.trim().toLowerCase();
+    if (key.isEmpty) return null;
+    final db = _db;
+    if (db == null) return null;
+    try {
+      final rows =
+          db.select('SELECT wire FROM packets WHERE id = ? LIMIT 1', [key]);
+      if (rows.isEmpty) return null;
+      return XprsPacket.parse(rows.first.columnAt(0) as String);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Caps. Prefs-backed by the owner (MeshService reads them at init and on
   /// change); the defaults are a judgement, not a specification (§31.3).
   int maxBytes = 500 * 1024 * 1024;

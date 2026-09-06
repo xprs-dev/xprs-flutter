@@ -93,6 +93,7 @@ import '../folders/piece_hashes.dart';
 import '../../wapp/geoui/widgets/media_view.dart' show sharedMediaArchive;
 import '../../wapp/geoui/activity_archive.dart';
 import '../../wapp/android_foreground_service.dart';
+import '../mesh/mesh_store.dart';
 import 'package:reticulum/reticulum.dart'
     show MediaArchive, MediaRef, MediaKind;
 import 'package:reticulum/reticulum.dart' show BlossomServer;
@@ -853,6 +854,17 @@ class RnsService {
     return t.hasPath(bytes);
   }
 
+  /// Can we reach [callsign] over Reticulum RIGHT NOW? Resolve it to its LXMF
+  /// delivery dest and ask the transport whether a path to that dest is held.
+  /// This is the internet half of the chat's presence dot: a peer reachable
+  /// only over the hubs is not "heard on the air" (XprsMonitor), but it IS
+  /// reachable, and the dot must be green. Bounded resolve + a local path-table
+  /// lookup -- no crypto, no poll, safe on the main isolate.
+  bool reachableByCallsign(String callsign) {
+    final dest = lxmfDestForCallsign(callsign);
+    return dest.isNotEmpty && hasPathTo(dest);
+  }
+
   /// Diagnostic: our routing to [destHex] (next hop, interface, hops, age) plus
   /// our live interfaces and passive state — to debug WHY addressed packets to a
   /// destination do or don't get forwarded.
@@ -1568,6 +1580,12 @@ class RnsService {
     // receiving our own traffic); annRate = inbound announces/sec driving it.
     'passive': _transport?.passive ?? false,
     'annRate': (_transport?.announceRatePerSec ?? 0).round(),
+    // Announces shed for want of a verify token. `priVerifyShed` must stay flat:
+    // our own overlay (an XPRS 1:1 rides an `xprs/wapp` announce) now has its own
+    // verify budget, so a busy node no longer drops inbound 1:1s under foreign
+    // announce load.
+    'verifyShed': verifyBudgetShed,
+    'priVerifyShed': priVerifyBudgetShed,
     'connections': _server?.connectionCount ?? 0,
     'interfaces': _ifaces.length + (_server != null ? 1 : 0),
     'inbox': _inbox.length,
@@ -3356,6 +3374,11 @@ class RnsService {
           // authenticate it.
           acceptUnverified: (m) => m.fields.containsKey(_kWappLxmfField),
         );
+        // Bring back the outgoing-packet queue persisted before the last stop:
+        // any receipt or 1:1 that had not confirmed delivery resumes its ladder
+        // now, instead of being lost to a restart. Runs once _lxmf exists and
+        // the store is open.
+        _restoreOutboundQueue();
         // Route LXMF link requests by the DELIVERY DEST's own path — the
         // legacy per-identity hop picked an arbitrary destination's next hop
         // (often the hub, which never cross-forwards between clients) while a
@@ -5545,25 +5568,88 @@ class RnsService {
     return DateTime.now().millisecondsSinceEpoch - heard < _lxmfAudibleMs;
   }
 
+  /// Stable key for the outgoing-queue row: one logical send is one row across
+  /// restarts, so a message re-queued before its persisted copy loaded does not
+  /// double. Content-keyed on the packed bytes (their LXMF hash is what the peer
+  /// dedups on anyway), scoped by destination.
+  static String _txKey(String destHex, Uint8List packed) =>
+      '$destHex:${MeshStore.contentKey(packed)}';
+
   void _queueLxmfRetry(String destHex, Uint8List packed, String title,
       String content, Map<int, Object?>? fields) {
     // Wapp datagrams have their own delivery story; only user messages retry.
     if (fields != null && fields.containsKey(_kWappLxmfField)) return;
+    final key = _txKey(destHex, packed);
+    if (_lxmfRetries.any((e) => e['key'] == key)) return; // already queued
+    final at = DateTime.now().millisecondsSinceEpoch + _lxmfBackoffSec[0] * 1000;
     _lxmfRetries.add({
+      'key': key,
       'dest': destHex,
       'packed': packed,
       'title': title, // display only (pending strip)
       'content': content,
       'try': 0,
-      'at': DateTime.now().millisecondsSinceEpoch + _lxmfBackoffSec[0] * 1000,
+      'at': at,
     });
-    if (_lxmfRetries.length > 100) _lxmfRetries.removeAt(0);
+    // Persist it: the core's outgoing-packet queue survives a restart, so an
+    // undelivered receipt is retried until the target confirms rather than lost
+    // when the app is swiped away (docs/store-and-forward.md; the wapp keeps no
+    // outbound state, this is the core's).
+    MeshStore.instance.txPut(key, destHex, packed, title, content, 0, at);
+    if (_lxmfRetries.length > 100) {
+      final dropped = _lxmfRetries.removeAt(0);
+      MeshStore.instance.txDrop(dropped['key'] as String? ?? '');
+    }
     _notifyLxmf();
-    // 1s scan while anything is due soon: the early rungs are 2-10s apart and
-    // a 10s scan would erase them. The scan itself is a no-op when nothing is
-    // due, so the cost is nil.
+    _armLxmfPump();
+  }
+
+  /// Start the foreground 1s scan if it is not already running. The early rungs
+  /// are 2-10s apart and a slower scan would overshoot them; the scan is a
+  /// no-op when nothing is due, so the cost is nil. Background delivery rides
+  /// the native heartbeat instead (see [_armLxmfBackground]).
+  void _armLxmfPump() {
     _lxmfRetryTimer ??=
         Timer.periodic(const Duration(seconds: 1), (_) => _runLxmfRetries());
+  }
+
+  /// The foreground [Timer] above is throttled to nothing once Android
+  /// backgrounds the app (docs/performance.md 8.2), so the queue's retries
+  /// ALSO ride the 2 s native heartbeat — the same stack XprsCatchup uses. The
+  /// scan is a no-op when nothing is due, so a shared tick costs nil.
+  bool _lxmfBgArmed = false;
+  void _armLxmfBackground() {
+    if (_lxmfBgArmed || !Platform.isAndroid) return;
+    _lxmfBgArmed = true;
+    AndroidForegroundService.instance.addTickListener(_onLxmfNativeTick);
+  }
+
+  void _onLxmfNativeTick() => unawaited(_runLxmfRetries());
+
+  /// Reload the persistent outgoing-packet queue at startup and resume its
+  /// ladder. An `at` in the past (queued before the restart) is simply due, so
+  /// the first scan attempts it at once. Also arms the background driver.
+  void _restoreOutboundQueue() {
+    if (MeshStore.instance.ready) {
+      var restored = 0;
+      for (final e in MeshStore.instance.txLoad()) {
+        final key = e['key'] as String? ?? '';
+        if (key.isEmpty || _lxmfRetries.any((x) => x['key'] == key)) continue;
+        _lxmfRetries.add(e);
+        restored++;
+        if (_lxmfRetries.length > 100) {
+          final dropped = _lxmfRetries.removeAt(0);
+          MeshStore.instance.txDrop(dropped['key'] as String? ?? '');
+        }
+      }
+      if (restored > 0) {
+        LogService.instance.add('RNS/lxmf: restored $restored queued outgoing '
+            'packet(s) — resuming delivery');
+        _notifyLxmf();
+        _armLxmfPump();
+      }
+    }
+    _armLxmfBackground();
   }
 
   // One scan at a time. Each entry AWAITS a send that can take 12s, while the
@@ -5598,6 +5684,7 @@ class RnsService {
       final dh = _bytesFromHex(destHex);
       if (dh == null) {
         _lxmfRetries.remove(e);
+        MeshStore.instance.txDrop(e['key'] as String? ?? '');
         continue;
       }
       final t = _transport;
@@ -5616,6 +5703,8 @@ class RnsService {
       if (!_peerReachable(destHex, dh)) {
         if (t != null) t.requestPath(dh); // cheap, throttled, and it is the ask
         e['at'] = now + _lxmfParkMs;
+        MeshStore.instance
+            .txAdvance(e['key'] as String? ?? '', e['try'] as int, e['at'] as int);
         continue;
       }
       if (t != null && !t.hasPath(dh)) t.requestPath(dh);
@@ -5623,6 +5712,7 @@ class RnsService {
       final msg = LxmfMessage.unpack(e['packed'] as Uint8List);
       if (msg == null) {
         _lxmfRetries.remove(e);
+        MeshStore.instance.txDrop(e['key'] as String? ?? '');
         continue;
       }
       final outcome = await r.deliver(msg, timeout: const Duration(seconds: 12));
@@ -5631,20 +5721,24 @@ class RnsService {
       final ok = outcome == LxmfDelivery.confirmed;
       final who = destHex.length >= 8 ? destHex.substring(0, 8) : destHex;
       final n = (e['try'] as int) + 1;
+      final key = e['key'] as String? ?? '';
       if (ok) {
         _lxmfRetries.remove(e);
+        MeshStore.instance.txDrop(key);
         _notifyLxmf();
         LogService.instance
             .add('RNS/lxmf: retry $n delivered to $who over a direct link');
       } else if (n >= _lxmfBackoffSec.length) {
         // Give up on pushing; the copy stays in the mailbox for a pull.
         _lxmfRetries.remove(e);
+        MeshStore.instance.txDrop(key);
         _notifyLxmf();
         LogService.instance.add(
             'RNS/lxmf: $who unreachable after $n tries — left for relay pickup');
       } else {
         e['try'] = n;
         e['at'] = now + _lxmfBackoffSec[n] * 1000;
+        MeshStore.instance.txAdvance(key, n, e['at'] as int);
       }
     }
   }
@@ -8327,6 +8421,12 @@ class RnsService {
   double get announceRatePerSec => _transport?.announceRatePerSec ?? 0;
   int get pathCount => _transport?.pathCount ?? 0;
   bool get passive => _transport?.passive ?? false;
+  // Announces the transport isolate dropped for want of a verify token, by
+  // class. `priVerifyBudgetShed` climbing means our own overlay traffic (an
+  // XPRS 1:1 rides an `xprs/wapp` announce) is being shed — the bug this build
+  // fixes; it should stay flat now that priority has its own verify budget.
+  int get verifyBudgetShed => _transport?.verifyBudgetShed ?? 0;
+  int get priVerifyBudgetShed => _transport?.priVerifyBudgetShed ?? 0;
 
   /// Inbound relay-event rates from the NOSTR engine isolate (seen / stored /
   /// reactions / dropped since its last push). The public-relay firehose is
@@ -10790,6 +10890,8 @@ class RnsService {
     _nostrHub = null;
     AndroidForegroundService.instance.removeTickListener(_nostrBackgroundTick);
     AndroidForegroundService.instance.removeTickListener(pumpAnnounce);
+    AndroidForegroundService.instance.removeTickListener(_onLxmfNativeTick);
+    _lxmfBgArmed = false;
     unawaited(AndroidForegroundService.instance.release('nostr'));
     // ignore: discarded_futures
     _nostrWs?.stop();

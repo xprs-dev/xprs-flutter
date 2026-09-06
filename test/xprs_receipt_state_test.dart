@@ -61,6 +61,18 @@ void main() {
       expect(XprsOutbox.unknown, 1);
     });
 
+    test('a receipt with no outbox row still updates the bubble when the peer '
+        'is known (older message / after a restart)', () {
+      final seen = <String>[];
+      WappDelivery.onPublish =
+          (topic, row) => seen.add('$topic|${row['id']}|${row['state']}');
+      // No noteSent for this id: the outbox has no row (aged out or restarted).
+      XprsOutbox.instance.noteReceipt('old123', state: 'read', peer: 'X1WATT');
+      expect(seen, ['xprs.status.tx|old123|read'],
+          reason: 'the persistent bubble status is still told, via the peer');
+      WappDelivery.onPublish = null;
+    });
+
     test('a state change is published for the wapp that drew the bubble', () {
       final seen = <String>[];
       WappDelivery.onPublish = (topic, row) =>
@@ -135,6 +147,45 @@ void main() {
       // and why the `am:` token this replaced was redundant.
       expect(XprsReceipt.debugRemembers(xprsIdentifier(msg)), isTrue);
       expect(XprsReceipt.debugRemembers('000000'), isFalse);
+    });
+  });
+
+  group('the read receipt rides the lane the message arrived on', () {
+    // §36.0: answer down the freshest evidence of a path to the sender, not
+    // whatever bearer they last DECLARED. A peer reachable only over Reticulum
+    // but wearing a stale `link:ble` would otherwise have its read receipt aired
+    // at a radio it cannot hear, and the sender's second tick would never land.
+    test('bearerFor returns the bearer the message was remembered with', () {
+      final msg = _p('t:message f:X1QZ3N d:X1SELF ts:$_ts m:on my way');
+      final id = xprsIdentifier(msg);
+      XprsReceipt.debugForget();
+      XprsReceipt.remember(msg, 'reticulum');
+      expect(XprsReceipt.bearerFor(id), 'reticulum');
+      // Case-insensitive on the id, matching composeRead's lookup.
+      expect(XprsReceipt.bearerFor(id.toUpperCase()), 'reticulum');
+    });
+
+    test('an unremembered id pins no lane, so the publisher chooses', () {
+      XprsReceipt.debugForget();
+      expect(XprsReceipt.bearerFor('abc123'), isNull);
+    });
+
+    test('remember with no bearer keeps the packet but pins no lane', () {
+      final msg = _p('t:message f:X1QZ3N d:X1SELF ts:$_ts m:on my way');
+      final id = xprsIdentifier(msg);
+      XprsReceipt.debugForget();
+      XprsReceipt.remember(msg);
+      expect(XprsReceipt.debugRemembers(id), isTrue);
+      expect(XprsReceipt.bearerFor(id), isNull,
+          reason: 'a legacy caller that names no lane strands nothing');
+    });
+
+    test('debugForget clears the lane store too', () {
+      final msg = _p('t:message f:X1QZ3N d:X1SELF ts:$_ts m:on my way');
+      final id = xprsIdentifier(msg);
+      XprsReceipt.remember(msg, 'reticulum');
+      XprsReceipt.debugForget();
+      expect(XprsReceipt.bearerFor(id), isNull);
     });
   });
 }

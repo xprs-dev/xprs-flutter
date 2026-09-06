@@ -3662,8 +3662,13 @@ class WappEngine {
             selfCallsign: MeshService.instance.tableCallsign);
         if (r == null) return -1;
         XprsReceiptCounters.readSent++;
-        unawaited(XprsPublisher.instance
-            .publishWire(r.encode(), slot: 'read:$id', verbatim: true));
+        // Send the read receipt back the lane the message arrived on, not
+        // whatever the sender last declared — see XprsReceipt._bearer. Null
+        // (aged out) falls through to the publisher's own choice.
+        unawaited(XprsPublisher.instance.publishWire(r.encode(),
+            slot: 'read:$id',
+            verbatim: true,
+            prefer: XprsReceipt.bearerFor(id)));
         return 0;
       },
       params: [ValueTy.i32, ValueTy.i32],

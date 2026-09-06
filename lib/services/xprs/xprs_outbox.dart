@@ -76,14 +76,23 @@ class XprsOutbox {
   ///
   /// Publishes the change so the wapp that drew the bubble can draw a tick on
   /// it, instead of asserting a state the core never confirmed.
-  void noteReceipt(String id, {required String state}) {
+  void noteReceipt(String id, {required String state, String? peer}) {
     final to = state == 'read' ? TxState.read : TxState.delivered;
     final row = _rows[id];
     if (row == null) {
-      // A receipt for something we do not remember sending is not an error:
-      // the row may have aged out, or this build may have restarted. Counted
-      // so it is visible rather than mysterious.
+      // No local record of sending it: the row aged out of this pocket, or the
+      // outbox is empty because the app restarted (it is session-lived). The
+      // tick a person SEES lives in the wapp's persistent per-message status,
+      // not here, so a VERIFIED receipt must still reach it -- otherwise a read
+      // receipt for an older message updates nothing and the bubble is stuck on
+      // one check forever. The wapp ranks the status monotonically, so a late
+      // `ack` arriving after a `read` cannot walk the bubble backwards.
       unknown++;
+      if (peer != null && peer.isNotEmpty) {
+        LogService.instance
+            .add('XPRS: $id is $to ($peer) — status only, no outbox row');
+        WappDelivery.instance.deliverStatus(id: id, peer: peer, state: to);
+      }
       return;
     }
     if (!TxState.advances(row.state, to)) return;

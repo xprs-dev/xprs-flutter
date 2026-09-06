@@ -7573,6 +7573,22 @@ choosing rather than one that reaches the asker. That is what makes it
 invisible -- the choice is made once, in code, and thereafter every answer
 goes out somewhere consistent, plausible, and unrelated to who asked.
 
+**Evidence that a path works is not all the same strength, and a claim must
+not silence proof.** A station's `link:` (section 10.6.1) is its own word that
+it stands on a radio -- `ble`, `lan`, `lora`. It is the best evidence a local
+mesh ever has, and it is a claim, not a measurement: it says the sender is on
+that radio, not that you share it. A bearer that carries no `link:` declares
+itself through no beacon at all -- the internet path has none, because it is
+not a radio a station stands on -- and the only evidence it works is a live
+route the transport holds. The two are therefore not interchangeable. Until
+`via:` tells a beacon heard on the air from one relayed home (section 37, not
+yet implemented), a station on a different network advertises its `link:ble`
+into your ear byte-for-byte as though it were in the room, so a path you have
+merely been told about must never suppress one you have confirmed. When a
+claimed path and a proven one both stand and nothing confirms the claim,
+answer on both: the claim costs one packet that deduplicates away, and the
+proven path is the one that arrives.
+
 None of this is `scope:local` (section 13.11.1). Scope says how far a packet
 may travel and therefore which bearers may carry it, and it constrains the
 archiver's answer exactly as it constrains anything else. It is a property of

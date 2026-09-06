@@ -103,25 +103,52 @@ class XprsReceipt {
   static const int _rememberMax = 200;
   static final Map<String, XprsPacket> _delivered = {};
 
-  /// Remember [p] for a later `s:read`. Called where the delivery `s:ack` is
-  /// composed, so only messages that qualify for a receipt are held.
-  static void remember(XprsPacket p) {
+  /// The bearer each remembered message ARRIVED on, by §5 identifier. The
+  /// `s:read` composed later (wapp_engine `hal_xprs_read`) is aired back down
+  /// this lane — the freshest evidence of a path to the sender — rather than
+  /// whatever bearer the sender last *declared*. A peer reachable only over
+  /// Reticulum but still wearing a stale `link:ble` from a relayed beacon would
+  /// otherwise have its read receipt aired at a radio it cannot hear. Kept in
+  /// lockstep with [_delivered]; same 200-entry pocket.
+  static final Map<String, String> _bearer = {};
+
+  /// Remember [p] and the [bearer] it arrived on for a later `s:read`. Called
+  /// where the delivery `s:ack` is composed, so only messages that qualify for
+  /// a receipt are held.
+  static void remember(XprsPacket p, [String? bearer]) {
     final id = xprsIdentifier(p);
     if (id.isEmpty || _delivered.containsKey(id)) return;
     if (_delivered.length >= _rememberMax) {
-      _delivered.remove(_delivered.keys.first);
+      final oldest = _delivered.keys.first;
+      _delivered.remove(oldest);
+      _bearer.remove(oldest);
     }
     _delivered[id] = p;
+    if (bearer != null && bearer.isNotEmpty) _bearer[id] = bearer;
   }
 
+  /// The bearer a remembered message arrived on, or null when we no longer hold
+  /// it (aged out, or arrived before this build). Null lets the publisher pick.
+  static String? bearerFor(String id) => _bearer[id.trim().toLowerCase()];
+
   /// Test seams for the remembered set.
-  static void debugForget() => _delivered.clear();
+  static void debugForget() {
+    _delivered.clear();
+    _bearer.clear();
+  }
   static bool debugRemembers(String id) => _delivered.containsKey(id);
 
   /// The `s:read` for a message a person has now opened, or null when we no
   /// longer hold it or §13.7.1 refuses one.
   static XprsPacket? composeRead(String id, {required String selfCallsign}) {
-    final p = _delivered[id.trim().toLowerCase()];
+    final key = id.trim().toLowerCase();
+    // The live pocket first; then the core's persistent spool, so a person who
+    // opens an OLD conversation still acks every message they read, not only the
+    // last few the pocket happens to hold (and not at all after a restart wiped
+    // it). Same door either way -- the packet, resolved by the core from its own
+    // stores; the wapp only ever names the §5 id.
+    var p = _delivered[key];
+    p ??= XprsArchive.instance.packetById(key);
     if (p == null) {
       XprsReceiptCounters.readUnknown++;
       return null;

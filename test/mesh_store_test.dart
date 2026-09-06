@@ -456,5 +456,52 @@ void main() {
       expect(took, isTrue);
       expect(store.heldJson(), hasLength(1));
     });
+  
+  group('the persistent outgoing-packet queue (tx_outbound)', () {
+    test('a queued packet round-trips: put, load, advance, drop', () {
+      final packed = Uint8List.fromList(List.generate(40, (i) => i));
+      store.txPut('k1', '9fe08ecd', packed, 'xprs', 'hello', 0, 1000);
+      var rows = store.txLoad();
+      expect(rows.length, 1);
+      expect(rows.first['key'], 'k1');
+      expect(rows.first['dest'], '9fe08ecd');
+      expect(rows.first['try'], 0);
+      expect(rows.first['at'], 1000);
+      expect(rows.first['packed'], packed);
+
+      store.txAdvance('k1', 3, 5000);
+      rows = store.txLoad();
+      expect(rows.first['try'], 3);
+      expect(rows.first['at'], 5000);
+
+      store.txDrop('k1');
+      expect(store.txLoad(), isEmpty);
+    });
+
+    test('a re-put on the same key replaces, not duplicates', () {
+      final a = Uint8List.fromList([1, 2, 3]);
+      final b = Uint8List.fromList([4, 5, 6]);
+      store.txPut('k2', 'dst', a, 't', 'c', 0, 1);
+      store.txPut('k2', 'dst', b, 't', 'c', 1, 2);
+      final rows = store.txLoad();
+      expect(rows.length, 1);
+      expect(rows.first['packed'], b);
+      expect(rows.first['try'], 1);
+    });
+
+    test('the queue survives a reopen — this is the point of persisting it', () {
+      final packed = Uint8List.fromList([9, 9, 9, 9]);
+      store.txPut('k3', 'dst', packed, 'xprs', 'ack', 2, 42);
+      final path = '${tmp.path}/mesh.sqlite3';
+      store.close();
+      store.init(path); // as a restart would
+      final rows = store.txLoad();
+      expect(rows.length, 1);
+      expect(rows.first['key'], 'k3');
+      expect(rows.first['try'], 2);
+      expect(rows.first['packed'], packed);
+    });
   });
+
+});
 }

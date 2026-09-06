@@ -719,6 +719,15 @@ class MeshCourier {
           'Courier: #$_delivered to a person from ${f.from} '
           '(${body.length}B of text)');
     }
+    // REMEMBER it BEFORE the wapp door. The wapp may mark it read the instant
+    // it lands (a message read live in an open thread), which asks the core for
+    // an s:read synchronously inside deliverMessage below — and composeRead can
+    // only answer for a packet it already holds. Remembering after delivery
+    // (in _acknowledge) meant that live read receipt found nothing and the
+    // sender's tick never advanced past the single delivered check. remember()
+    // is idempotent, so _acknowledge's own call is now a no-op.
+    XprsReceipt.remember(p, _receiptLane(via));
+
     // STRAIGHT TO THE WAPP DOOR. An XPRS message is addressed by CALLSIGN and
     // carries no LXMF anything; the core owns the one door every wapp reads
     // from (WappDelivery), and the bearer it arrived on is the only word the
@@ -751,7 +760,7 @@ class MeshCourier {
     // (§36.0), which is the freshest path we have back to them. Composed only
     // when §13.7.1 allows: not for a group, not for a broadcast, not for a
     // stranger, and never unsigned.
-    _acknowledge(p);
+    _acknowledge(p, via);
 
     // "Frames that ended at us, the target." This counter existed but was only
     // incremented on the MSP session lane, so a message delivered off the AIR
@@ -762,18 +771,45 @@ class MeshCourier {
     return true;
   }
 
-  void _acknowledge(XprsPacket p) {
+  void _acknowledge(XprsPacket p, String via) {
     final self = MeshService.instance.tableCallsign;
     final r = XprsReceipt.compose(p, selfCallsign: self);
     if (r == null) return;
-    // Keep the packet: §13.7's other state, `s:read`, can only be composed
-    // once a person opens the message, and by then the only thing the wapp can
-    // name it by is its §5 identifier. Remembered HERE because a message that
-    // earned an `s:ack` is exactly the set that may later earn an `s:read`.
-    XprsReceipt.remember(p);
+    // Keep the packet AND the lane it arrived on. §13.7's other state,
+    // `s:read`, can only be composed once a person opens the message, and by
+    // then the only thing the wapp can name it by is its §5 identifier.
+    //
+    // §36.0: answer down the lane the message arrived on -- the freshest
+    // evidence of a working path to the sender. Without it a peer reachable
+    // only over Reticulum, but wearing a stale `link:ble` from a relayed
+    // beacon, would have the receipt aired at a radio it cannot hear and the
+    // sender's tick would never advance. Mapped ONCE here to the publisher's
+    // bearer name and stored, so the later `s:read` (hal_xprs_read) rides the
+    // same lane without re-deriving it. `prefer` still falls back to the
+    // fan-out if that bearer cannot carry it.
+    final lane = _receiptLane(via);
+    XprsReceipt.remember(p, lane);
     XprsReceiptCounters.sent++;
     unawaited(XprsPublisher.instance.publishWire(r.encode(),
-        slot: 'ack:${r['r']}', verbatim: true));
+        slot: 'ack:${r['r']}', verbatim: true, prefer: lane));
+  }
+
+  /// The publisher bearer name for a receipt answering a message heard on
+  /// [via]. The arrival tag is an archive bearer (`rns`, `ble`, `lan`); the
+  /// publisher's bearers are named `reticulum`/`ble5`/`lan`.
+  static String? _receiptLane(String via) {
+    switch (via) {
+      case 'rns':
+        return 'reticulum';
+      case 'ble':
+        return 'ble5';
+      case 'lan':
+        return 'lan';
+      case 'lora':
+        return 'lora';
+      default:
+        return null; // custody / unknown -> let the publisher choose
+    }
   }
 
   /// A frame addressed to us arrived — overheard on air, or handed over by a
