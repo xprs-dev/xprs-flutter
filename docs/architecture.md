@@ -239,3 +239,33 @@ commit message.
 
 Deleting a rule is not an accepted response to it firing. Each rule encodes a
 defect that has already occurred.
+
+---
+
+## 6. Testing a wapp feature
+
+A wapp touches nothing but the HAL (§1), so a wapp feature is fully testable
+without a device: the HAL is the only surface it has, and the HAL can be mocked.
+**Test chat features in the internal, on-machine test environment — do not reach
+for a phone or a built bundle to prove a chat flow works.**
+
+Because transports are the core's (§4), the mock HAL is where a network
+connection is simulated: one instance's `hal_xprs_send` / `hal_xprs_message` /
+`hal_xprs_broadcast` / `hal_xprs_read` becomes a delivery into another instance's
+event queue, shaped exactly as the core shapes it. That is a stand-in core, not
+a wapp shortcut — the wapp under test still decides nothing about how bytes
+travel, and closed-group membership is still enforced at the core's door.
+
+For chat this environment already exists:
+
+- `wapps/chat/tests/native/` — many instances of the real wapp
+  (`main.c`/`room.c`/`db.c`/`thread.c`/`xprs.c`) in one process. `hal_mock.c`
+  carries the mock HAL and NULL-default network hooks; `run.sh` drives one node,
+  `run-sim.sh` (`sim.c`) drives a network of them.
+- 1:1, closed-group and Local flows — delivery, read receipts, reactions with
+  the sender's own echo, the membership door, emoji, and survival of a restart —
+  run there in seconds, no build lock, no install.
+
+A new chat feature ships with its scenario in that harness. A feature that
+genuinely cannot be reached through the HAL is a sign the feature is in the
+wrong layer (§3), not a reason to test it only on a device.
