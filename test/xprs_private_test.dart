@@ -342,6 +342,20 @@ void main() {
       expect(chunks.join(' '), 'alpha bravo charlie delta');
     });
 
+    test('a hard cut lands on a code-point boundary, never inside an emoji',
+        () {
+      // 12 emoji = 48 UTF-8 bytes, one "word". A unit-counted cut would have
+      // taken 12 UTF-16 units = 6 emoji per part and could split a pair.
+      final word = '😀' * 12;
+      final chunks = xprsChunkAtSpaces(word, 10); // 10 bytes = 2 emoji + 2 spare
+      expect(chunks.join(), word, reason: 'nothing lost, nothing invented');
+      for (final c in chunks) {
+        expect(utf8.encode(c).length, lessThanOrEqualTo(10));
+        expect(c.length.isEven, isTrue, reason: 'no lone surrogate: $c');
+        expect(c.runes.every((r) => r == 0x1F600), isTrue);
+      }
+    });
+
     test('hard-cuts a word longer than a whole part', () {
       final chunks = xprsChunkAtSpaces('x' * 50, 12);
       expect(chunks.length, greaterThan(1));

@@ -107,6 +107,13 @@ void main() {
         reason: 'no record of that group: nothing to verify, fails open');
     expect(pub.mayAir(post('X1PZ4Q', 'X1RD89')), isTrue,
         reason: 'not a group at all');
+    // A reaction is the same door as a post (6.5 counts callsigns; a
+    // stranger's is not counted).
+    XprsPacket react(String from, String to) => XprsPacket.parse(
+        't:reaction f:$from d:$to ts:2026-08-08_12:00:00 r:abc123 add:like')!;
+    expect(pub.mayAir(react('X1PZ4Q', grp)), isFalse, reason: 'stranger');
+    XprsArchive.instance.selfCallsign = 'X1RD89';
+    expect(pub.mayAir(react('X1RD89', grp)), isTrue, reason: 'member');
     XprsArchive.instance.selfCallsign = '';
     g.clear();
   });

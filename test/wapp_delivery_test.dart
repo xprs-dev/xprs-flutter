@@ -104,6 +104,11 @@ void main() {
     expect(WappDelivery.refusedGroupAuthor, 1);
     // A group we hold no record of: nothing to verify against, fails open.
     expect(deliver('t:message f:X1PZ4Q d:X5ZZZZ $ts m:unverifiable'), 1);
+    // A reaction to a group post: same door (6.5).
+    bus.subscribe('chat', rxTopicFor('reaction'));
+    expect(deliver('t:reaction f:X1PZ4Q d:$g $ts r:abc123 add:like'), 0,
+        reason: 'a stranger\'s heart is not counted');
+    expect(deliver('t:reaction f:X1RD89 d:$g $ts r:abc123 add:like'), 1);
     // The same rule on the content lane.
     expect(
         WappDelivery.instance.deliverMessage(

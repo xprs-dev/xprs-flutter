@@ -511,17 +511,17 @@ class WappEngine {
     return Uint8List.fromList(mem.buffer.asUint8List(ptr, len));
   }
 
-  int _writeStr(int ptr, int maxLen, String s) {
-    final bytes = s.codeUnits;
-    final n = bytes.length < maxLen ? bytes.length : maxLen;
-    final mem = _memory!.view;
-    for (var i = 0; i < n; i++) mem[ptr + i] = bytes[i];
-    // NUL-terminate so the wapp's strlen-based readers work on uninitialized
-    // (stack) buffers — without this, s_len() runs past the data into garbage,
-    // corrupting e.g. signatures carried in datagram JSON.
-    if (n < maxLen) mem[ptr + n] = 0;
-    return n;
-  }
+  /// Write [s] into wasm memory as UTF-8, NUL-terminated when it fits.
+  ///
+  /// This used to copy `s.codeUnits` — UTF-16 — one unit per byte, so every
+  /// unit was truncated to its low byte. Fine for ASCII, which is why it
+  /// survived; for an emoji it is a silent NUL: 😀 is `D83D DE00`, whose low
+  /// bytes are `=` and `\0`, and the wapp's JSON reader stopped there. A
+  /// message typed with a smiley was cut at the smiley, or not sent at all
+  /// with nothing said. Every HAL result that names a person or carries JSON
+  /// crossed here the same way. The wapp side reads bytes and its JSON is
+  /// byte-transparent above 0x20, so UTF-8 is what it always expected.
+  int _writeStr(int ptr, int maxLen, String s) => _writeUtf8(ptr, maxLen, s);
 
   /// The active profile's public key as base64url (no padding) of the raw 32
   /// bytes, decoded from the stored npub. Empty if unavailable.
@@ -1786,7 +1786,8 @@ class WappEngine {
     // ── Message HAL ──
 
     final halMsgAvailable = WasmFunction(
-      () => _inbox.isEmpty ? 0 : _inbox.first.codeUnits.length,
+      // Bytes, as the writer will produce them — not UTF-16 units.
+      () => _inbox.isEmpty ? 0 : utf8.encode(_inbox.first).length,
       params: [], results: [ValueTy.i32],
     );
     final halMsgRecv = WasmFunction(

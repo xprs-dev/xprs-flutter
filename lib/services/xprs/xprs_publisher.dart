@@ -368,7 +368,9 @@ class XprsPublisher {
   /// refuses nothing. Everything else is true. Read-only, synchronous, so the
   /// HAL can answer a wapp at once with the same rule [publishWire] enforces.
   bool mayAir(XprsPacket p) {
-    if (p.type != 'message') return true;
+    // A reaction to a group's post is the same class as a post to it (6.5 is
+    // "counted once per callsign", and a stranger's callsign is not counted).
+    if (p.type != 'message' && p.type != 'reaction') return true;
     final g = (p['d'] ?? '').trim().toUpperCase();
     if (!g.startsWith('X5')) return true;
     final me = XprsArchive.instance.selfCallsign.trim().toUpperCase();

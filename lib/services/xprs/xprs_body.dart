@@ -278,8 +278,16 @@ List<String> xprsChunkAtSpaces(String text, int capacity) {
   for (final word in text.split(' ')) {
     var w = word;
     while (utf8.encode(w).length > capacity) {
-      chunks.add(w.substring(0, capacity));
-      w = w.substring(capacity);
+      // The budget is BYTES; `substring` counts UTF-16 units. Cutting by
+      // units over-cut a word with emoji in it and could sever a surrogate
+      // pair, leaving a lone surrogate in a part. Cut by bytes, backed off
+      // to a code-point boundary (a UTF-8 continuation byte is 10xxxxxx).
+      final b = utf8.encode(w);
+      var cut = capacity;
+      while (cut > 0 && (b[cut] & 0xC0) == 0x80) cut--;
+      if (cut == 0) break; // a single code point wider than the part: keep it
+      chunks.add(utf8.decode(b.sublist(0, cut)));
+      w = utf8.decode(b.sublist(cut));
     }
     final trial = current.isEmpty ? w : '$current $w';
     if (utf8.encode(trial).length > capacity) {

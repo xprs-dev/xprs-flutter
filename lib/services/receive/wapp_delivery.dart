@@ -165,7 +165,7 @@ class WappDelivery {
     // that is still short publishes nothing.
     final p = _whole(pIn, bearer: bearer, rssi: rssi);
     if (p == null) return 0;
-    if (p.type == 'message' &&
+    if ((p.type == 'message' || p.type == 'reaction') &&
         !groupAuthorMayPost(
             p['d'] ?? '', NostrCrypto.bareCallsign(p['f'] ?? ''))) {
       refusedGroupAuthor++;
