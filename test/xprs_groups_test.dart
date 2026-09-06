@@ -3,6 +3,8 @@
  * the same answer from the same packets", so they are worth testing as rules
  * rather than as whatever the code happens to do.
  */
+import 'dart:ffi';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:xprs/services/xprs/xprs_groups.dart';
@@ -11,6 +13,8 @@ import 'package:xprs/services/xprs/xprs_packet.dart';
 import 'package:xprs/services/xprs/xprs_sig.dart';
 import 'package:xprs/util/nostr_crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sqlite3/open.dart';
+import 'package:xprs/services/xprs/xprs_group_keys.dart';
 import 'package:hex/hex.dart';
 
 const g = 'X5A3F2';
@@ -387,5 +391,103 @@ void main() {
     expect(r.roles['X5K2M9'], XprsRole.sub);
     expect(m.mayPost(g, 'X5K2M9', nowMs: now), isFalse,
         reason: 'listing confers no authority (26.2)');
+  });
+
+  group('durable store — a member survives a restart', () {
+    late Directory tmp;
+    late String path;
+    setUpAll(() {
+      if (Platform.isLinux) {
+        open.overrideFor(
+            OperatingSystem.linux, () => DynamicLibrary.open('libsqlite3.so.0'));
+      }
+    });
+    setUp(() {
+      tmp = Directory.systemTemp.createTempSync('xprsgroupsrestart');
+      path = '${tmp.path}/xprs_groups.sqlite3';
+      XprsGroupKeys.instance.init(path);
+    });
+    tearDown(() {
+      XprsGroupKeys.instance.close();
+      m.onActVerified = null;
+      tmp.deleteSync(recursive: true);
+    });
+
+    void wireStore() {
+      m.onActVerified = (grp, id, wire, ts) {
+        final store = XprsGroupKeys.instance;
+        store.putAct(grp, id, wire, ts);
+        final pub = _keys[grp]?.pub;
+        if (pub != null) {
+          store.rememberGroupKey(grp, NostrCrypto.encodeNpub(HEX.encode(pub)));
+        }
+      };
+    }
+
+    void restartResolvingFromStore() {
+      m.clear();
+      // After a restart the in-memory key map is empty; the resolver falls back
+      // to the group's own durable store, exactly as rns_service wires it.
+      m.keyResolver = (call) {
+        // A GROUP's key comes only from its per-group store — the general
+        // archive never kept it, which is the whole bug. A STATION's key comes
+        // from the general identity archive, modelled by _keys here.
+        if (call.startsWith('X5')) {
+          final npub = XprsGroupKeys.instance.npubFor(call);
+          if (npub == null || npub.isEmpty) return null;
+          try {
+            return Uint8List.fromList(HEX.decode(NostrCrypto.decodeNpub(npub)));
+          } catch (_) {
+            return null;
+          }
+        }
+        return _keys[call]?.pub;
+      };
+      var replayed = 0;
+      for (final grp in XprsGroupKeys.instance.followedGroups()) {
+        m.hydrate(XprsGroupKeys.instance.actsFor(grp));
+        replayed++;
+      }
+      expect(replayed, greaterThan(0));
+    }
+
+    test('the key and acts are replayed, and the roster is FULL after a restart',
+        () {
+      wireStore();
+      final grant = _act(g, '2026-08-08_10:00:00', 'grant:X1RD89');
+      m.offer(grant, nowMs: now);
+      m.offer(_accept('X1RD89', '2026-08-08_11:00:00', xprsIdentifier(grant)),
+          nowMs: now);
+      expect(m.rosterOf(g, nowMs: now).roles['X1RD89'], XprsRole.member);
+
+      restartResolvingFromStore();
+
+      final haveKey = m.keyResolver?.call(g) != null;
+      final r = m.rosterOf(g, nowMs: now, haveKey: haveKey);
+      expect(haveKey, isTrue, reason: 'the group key is in the store');
+      expect(r.verified, isTrue, reason: 'the stored group key verifies the acts');
+      expect(r.roles['X1RD89'], XprsRole.member,
+          reason: 'membership survived the restart, from the group store');
+    });
+
+    test('without the stored key the same acts collapse — the bug this fixes',
+        () {
+      // Persist the ACTS but not the KEY (rememberGroupKey never called).
+      m.onActVerified = (grp, id, wire, ts) =>
+          XprsGroupKeys.instance.putAct(grp, id, wire, ts);
+      final grant = _act(g, '2026-08-08_10:00:00', 'grant:X1RD89');
+      m.offer(grant, nowMs: now);
+      m.offer(_accept('X1RD89', '2026-08-08_11:00:00', xprsIdentifier(grant)),
+          nowMs: now);
+
+      restartResolvingFromStore();
+
+      final haveKey = m.keyResolver?.call(g) != null;
+      final r = m.rosterOf(g, nowMs: now, haveKey: haveKey);
+      expect(haveKey, isFalse, reason: 'the group key was never stored');
+      expect(r.verified, isFalse, reason: 'no key → cannot verify');
+      expect(r.roles['X1RD89'], isNot(XprsRole.member),
+          reason: 'the group-signed grant does not stand → roster collapses');
+    });
   });
 }

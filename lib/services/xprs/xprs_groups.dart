@@ -163,6 +163,11 @@ class XprsGroups {
   /// themselves whatever they liked by writing the group's callsign in `f:`.
   Uint8List? Function(String baseCallsign)? keyResolver;
 
+  /// Called for every verified `t:moderate` act, so the persistence layer can
+  /// keep it (and the group's key). Injected the way [keyResolver] is, so this
+  /// class stays a pure replay engine that knows nothing about sqlite.
+  void Function(String group, String id, String wire, int ts)? onActVerified;
+
   /// Feed one `t:moderate`. Returns false when the packet is not one, or when
   /// its signature does not stand up.
   bool offer(XprsPacket p, {int? nowMs}) {
@@ -233,6 +238,10 @@ class XprsGroups {
       list.removeAt(i >= 0 ? i : 0);
     }
     accepted++;
+    // Durable: hand the verified act to the store so a restart replays a full
+    // roster from the group's own record, not the general archive (which never
+    // kept a cellular member's key binding).
+    onActVerified?.call(group, act.id, p.encode(), ts);
     _cache.remove(group);
     _nextChange.remove(group);
     if (_changes.hasListener) _changes.add(group);

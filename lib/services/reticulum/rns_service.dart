@@ -32,6 +32,7 @@ import 'package:hex/hex.dart';
 import '../mesh/mesh_service.dart';
 import '../mesh/mesh_courier.dart';
 import '../xprs/xprs_archive.dart';
+import '../xprs/xprs_group_keys.dart';
 import '../xprs/xprs_groups.dart';
 import '../receive/packet_gateway.dart';
 import '../receive/core_state.dart';
@@ -156,12 +157,38 @@ class RnsService {
     // built entirely on signatures, so an act nobody can check must not move a
     // roster. Same shape as the archive's resolver above, deliberately.
     XprsGroups.instance.keyResolver = (base) {
-      final hex = pubkeyForCallsign(base);
+      var hex = pubkeyForCallsign(base);
+      if (hex == null || hex.isEmpty) {
+        // A closed group we belong to keeps its key in its own durable store
+        // (26.1). Off a cellular link the group's `t:identity` reached us only
+        // in the invite bundle and never landed in the general archive, so the
+        // in-memory map is empty after a restart -- but the store is not.
+        final npub = XprsGroupKeys.instance.npubFor(base);
+        if (npub != null && npub.isNotEmpty) {
+          try {
+            hex = NostrCrypto.decodeNpub(npub);
+          } catch (_) {}
+        }
+      }
       if (hex == null || hex.isEmpty) return null;
       try {
         return Uint8List.fromList(HEX.decode(hex));
       } catch (_) {
         return null;
+      }
+    };
+    // Every verified group act is written to the per-group store, together with
+    // the group's key the moment we hold it -- so a restart rebuilds a full,
+    // verified roster from the group's own record rather than scavenging the
+    // general archive (which drops a member's key binding).
+    XprsGroups.instance.onActVerified = (group, id, wire, ts) {
+      final keys = XprsGroupKeys.instance;
+      keys.putAct(group, id, wire, ts);
+      final hex = pubkeyForCallsign(group);
+      if (hex != null && hex.isNotEmpty) {
+        try {
+          keys.rememberGroupKey(group, NostrCrypto.encodeNpub(hex));
+        } catch (_) {}
       }
     };
     // And the other direction: a `t:identity` heard on any bearer teaches this
@@ -454,6 +481,13 @@ class RnsService {
     final hex = FollowSet.toHex(key); // accepts hex / npub / base64url
     if (hex != null) {
       _callPub[c] = hex;
+      // A closed group we already hold acts for: persist its key so the roster
+      // survives a restart even if the identity arrives after the grants.
+      if (XprsGroups.instance.known.contains(c)) {
+        try {
+          XprsGroupKeys.instance.rememberGroupKey(c, NostrCrypto.encodeNpub(hex));
+        } catch (_) {}
+      }
       // Learning a followed callsign's key may unblock fetching its profile.
       _maybeFetchFollowedProfile(c);
     }

@@ -56,6 +56,19 @@ class XprsGroupKeys {
         nick     TEXT NOT NULL DEFAULT '',
         created  INTEGER NOT NULL
       )''');
+    // A group we are only a MEMBER of gets a row here too (npub set, nsec
+    // empty), and its signed acts are kept in their own table -- so the roster
+    // (26.4) is rebuilt from THIS store on restart, not scavenged from the
+    // general archive where a cellular member's key binding never lands. One
+    // durable home per X5 group, like a chat conversation's own sqlite.
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS xprs_group_acts(
+        callsign TEXT NOT NULL,
+        id       TEXT NOT NULL,
+        wire     TEXT NOT NULL,
+        ts       INTEGER NOT NULL,
+        PRIMARY KEY(callsign, id)
+      )''');
     _db = db;
   }
 
@@ -126,8 +139,8 @@ class XprsGroupKeys {
   /// Every group this station administers.
   List<XprsOwnGroup> mine() {
     final rows = _db?.select(
-        'SELECT callsign, npub, nick, created FROM xprs_groups '
-        'ORDER BY created DESC');
+        "SELECT callsign, npub, nick, created FROM xprs_groups "
+        "WHERE nsec != '' ORDER BY created DESC");
     if (rows == null) return const [];
     return [
       for (final r in rows)
@@ -140,14 +153,60 @@ class XprsGroupKeys {
     ];
   }
 
+  /// Remember a group's PUBLIC key for a group we are a member of (no private
+  /// key). Insert-or-ignore, so it never clobbers an admin row's `nsec`, and
+  /// the callsign derives from the key (26.1) so the npub is stable per row.
+  void rememberGroupKey(String callsign, String npub) {
+    final db = _db;
+    final c = callsign.trim().toUpperCase();
+    final k = npub.trim();
+    if (db == null || c.isEmpty || k.isEmpty) return;
+    db.execute(
+        "INSERT OR IGNORE INTO xprs_groups(callsign, npub, nsec, nick, created)"
+        " VALUES(?,?,'','',?)",
+        [c, k, DateTime.now().millisecondsSinceEpoch]);
+  }
+
+  /// Keep one verified `t:moderate` act for a group, deduped by its section 5
+  /// id. This is the roster's durable record (26.4).
+  void putAct(String callsign, String id, String wire, int ts) {
+    final db = _db;
+    final c = callsign.trim().toUpperCase();
+    if (db == null || c.isEmpty || id.isEmpty || wire.isEmpty) return;
+    db.execute(
+        'INSERT OR IGNORE INTO xprs_group_acts(callsign, id, wire, ts) '
+        'VALUES(?,?,?,?)',
+        [c, id, wire, ts]);
+  }
+
+  /// The stored acts for one group, oldest first -- the wires `XprsGroups`
+  /// replays to rebuild the roster at startup.
+  List<String> actsFor(String callsign) {
+    final rows = _db?.select(
+        'SELECT wire FROM xprs_group_acts WHERE callsign = ? ORDER BY ts ASC',
+        [callsign.trim().toUpperCase()]);
+    if (rows == null) return const [];
+    return [for (final r in rows) (r['wire'] ?? '').toString()];
+  }
+
+  /// Every X5 group this station keeps state for -- administered OR a member of.
+  List<String> followedGroups() {
+    final rows = _db?.select(
+        'SELECT callsign FROM xprs_groups '
+        'UNION SELECT DISTINCT callsign FROM xprs_group_acts');
+    if (rows == null) return const [];
+    return [for (final r in rows) (r['callsign'] ?? '').toString()];
+  }
+
   /// Hand the group on: section 26.6's succession is handing over the key, and
   /// dropping our copy is the half of that we can actually do. The previous
   /// holder keeping a copy is named there as a cost with no protocol answer.
   bool forget(String callsign) {
     final db = _db;
     if (db == null) return false;
-    db.execute('DELETE FROM xprs_groups WHERE callsign = ?',
-        [callsign.trim().toUpperCase()]);
+    final c = callsign.trim().toUpperCase();
+    db.execute('DELETE FROM xprs_groups WHERE callsign = ?', [c]);
+    db.execute('DELETE FROM xprs_group_acts WHERE callsign = ?', [c]);
     return true;
   }
 }

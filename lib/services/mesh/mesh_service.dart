@@ -220,28 +220,37 @@ class MeshService {
         // announcements that say so. Replay them; they are signed, so the
         // binding is re-derived rather than trusted, and no airtime is spent.
         XprsIngest.rebindFromArchive();
-        // And the same for closed groups: keys first (above), then the acts
-        // those keys check. A roster lives in memory, so without this every
-        // group a station belongs to disappears on restart (26.4).
-        final acts = XprsArchive.instance
+        // Closed groups keep their OWN durable store -- the group's key and its
+        // t:moderate acts -- so a roster is rebuilt from the group's record and
+        // not scavenged from the general archive (which never kept a cellular
+        // member's key binding, so a mere restart lost the membership). Open it
+        // FIRST, then replay each group from it; the keyResolver falls back to
+        // this store, so the acts verify even before any announce (26.4).
+        // Profile-scoped and encrypted for the reason 26.6 gives: a leaked
+        // group key is permanent and cannot be rotated (the callsign derives
+        // from it).
+        XprsGroupKeys.instance.init(
+            wappsDataStorage(prefs).getAbsolutePath('xprs_groups.sqlite3'));
+        var n = 0;
+        for (final g in XprsGroupKeys.instance.followedGroups()) {
+          n += XprsGroups.instance.hydrate(XprsGroupKeys.instance.actsFor(g));
+        }
+        // Migration + belt-and-braces: also replay any group acts the GENERAL
+        // archive still holds (from before this store existed). offer() writes
+        // each verified one through to the per-group store, so the store seeds
+        // itself once and is authoritative thereafter. Harmless dedup on a
+        // store that already has them.
+        n += XprsGroups.instance.hydrate(XprsArchive.instance
             .query(types: const ['moderate'], limit: 512)
             .map((r) => r['wire'])
             .whereType<String>()
             .toList()
             .reversed
-            .toList();
-        final n = XprsGroups.instance.hydrate(acts);
+            .toList());
         if (n > 0) LogService.instance.add('XPRS: replayed $n group act(s)');
         XprsHistoryServer.instance.install();
         XprsGossip.instance
             .init(wappsDataStorage(prefs).getAbsolutePath('xprs_gossip.sqlite3'));
-        // The groups this station ADMINISTERS -- their private keys (26.1).
-        // Profile-scoped and re-opened on profile change like the others, and
-        // encrypted for the same reason the profile's own nsec is: 26.6 says a
-        // leaked group key is permanent and cannot be rotated, because the
-        // callsign derives from it.
-        XprsGroupKeys.instance.init(
-            wappsDataStorage(prefs).getAbsolutePath('xprs_groups.sqlite3'));
         if (prefs.xprsSuperArchiver) {
           // The super budget (36.9.4): the table stops being pocket-sized.
           XprsGossip.instance.maxBytes = 256 * 1024 * 1024;
