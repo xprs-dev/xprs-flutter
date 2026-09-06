@@ -1,0 +1,17 @@
+- [Read performance.md before coding](read-performance-md-before-coding.md) — Max's standing requirement; it is the list of regressions that already shipped here
+- [Validating BLE changes on device](validate-ble-changes-on-device.md) — /api/status + dumpsys, and how to air a test XPRS frame from this laptop when no ESP32 is on the bench
+- [The app is XPRS, not Aurora](the-app-is-xprs-not-aurora.md) — never use the old name; legacy 'aurora' ids need migration
+- [Gossip and super-archivers](gossip-and-super-archivers.md) — Max's federation vocabulary; use these exact names
+- [Reticulum needs no inbound ports](reticulum-needs-no-inbound-ports.md) — never propose port-forwarding; links traverse NAT via hubs
+- [Read esp32.md before firmware work](read-esp32-md-before-firmware.md) — heap first, pin to core 1, FatFs traps, and how to measure without rebooting the board
+- [BLE bulk transfer limits](ble-bulk-transfer-limits.md) — BLE carries packets, not files; a stuck scanner needs a phone reboot
+- [BLE5 carries XPRS, not Reticulum](ble5-carries-xprs-not-reticulum.md) — the two lanes; file bytes ride MSP, and auto-paired GATT is not bonded
+- [Justify protocol additions](justify-protocol-additions.md) — show why existing fields don't already do the job, quoting the spec
+- [The GATT/MSP lane already exists](gatt-msp-lane-already-exists.md) — reuse it for 1:1; GATT is retired on every ESP32
+- [Fix at the receive point, not the display end](fix-at-the-receive-point-not-the-display-end.md) — one door, delete decision points; patch-stacking gets refused
+- [Chat wapp is XPRS-only, #LOCAL the only default room](chat-wapp-is-xprs-only-local-default.md) — no LXMF anything; no pre-created rooms; one sqlite per conversation via hal_sqlite
+- [Transport fixes live in the core bearer](transport-fixes-live-in-the-core-bearer.md) — one send path, one receive path; repair the bearer's lifecycle, never add a parallel route or a wapp workaround
+- [Chat is XPRS-only, no LXMF in the core delivery path](chat-is-xprs-only-no-lxmf-in-core-path.md) — a t:message goes Gateway→Ingest→Courier→WappDelivery with callsign/body/ts/id/bearer/NOSTR sig, never via injectLxmf or an LXMF hex; the way back is the publisher's local-first ranking
+- [Use RNS diagnostic endpoints, not screenshots](rns-reachability-use-diagnostic-endpoints.md) — haspath/route/whois to judge phone↔phone reachability; Reticulum routes between NAT'd phones via hubs
+- [Closed-group chat rendering](closed-group-chat-rendering.md) — membership is decided in the CORE (receive door + publisher gate), never the wapp; how an invite reaches a cellular-only peer (named targets + identity/acts bundle + rns-lane offer()); the ugrep -a / 20 s archive flush / pidof traps
+- [Durable per-group store, not self-heal](durable-per-group-store-not-selfheal.md) — closed-group membership lost on a mere restart is fixed by a durable per-X5-group sqlite (key + acts), never archiver/admin self-heal machinery
